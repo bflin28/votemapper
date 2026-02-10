@@ -1,0 +1,1097 @@
+"use client";
+
+import { useState, useMemo } from "react";
+import { useVoterStore } from "@/store/voter-store";
+import { Election, GeocodedVoter, Voter } from "@/lib/types";
+import {
+  voterScore,
+  engagementTier,
+  ENGAGEMENT_COLORS,
+  getTopElections,
+  shortElectionLabel,
+} from "@/lib/scoring";
+import { clusterVoters } from "@/lib/clustering";
+import { haversineDistance } from "@/lib/distance-matrix";
+import { optimizeRouteOrder } from "@/lib/route-optimizer";
+
+type SortKey = "name" | "voteCount" | "lastVoted";
+type SortDir = "asc" | "desc";
+
+const MAX_PLAN_DAYS = 30;
+const PLAN_PREVIEW_LIMIT = 6;
+
+interface DayPlan {
+  dayNumber: number;
+  dateValue: string;
+  dateLabel: string;
+  voters: Voter[];
+}
+
+function buildDayPlans(
+  voters: Voter[],
+  startDateValue: string,
+  days: number
+): DayPlan[] {
+  if (voters.length === 0 || days <= 0) return [];
+
+  const startDate = parseDateInput(startDateValue);
+  const baseSize = Math.floor(voters.length / days);
+  const extra = voters.length % days;
+
+  let cursor = 0;
+  const plans: DayPlan[] = [];
+
+  for (let i = 0; i < days; i++) {
+    const size = baseSize + (i < extra ? 1 : 0);
+    const votersForDay = voters.slice(cursor, cursor + size);
+    cursor += size;
+
+    const date = addDays(startDate, i);
+    plans.push({
+      dayNumber: i + 1,
+      dateValue: toDateInputValue(date),
+      dateLabel: formatCampaignDate(date),
+      voters: votersForDay,
+    });
+  }
+
+  return plans;
+}
+
+function toDateInputValue(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateInput(value: string): Date {
+  const parsed = new Date(`${value}T12:00:00`);
+  if (!isNaN(parsed.getTime())) return parsed;
+  const fallback = new Date();
+  fallback.setHours(12, 0, 0, 0);
+  return fallback;
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatCampaignDate(date: Date): string {
+  return date.toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function mergeUniqueIds(base: string[], additions: string[]): string[] {
+  const existing = new Set(base);
+  const next = [...base];
+  for (const id of additions) {
+    if (!existing.has(id)) {
+      existing.add(id);
+      next.push(id);
+    }
+  }
+  return next;
+}
+
+function csvValue(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  const str = String(value);
+  if (/[",\n]/.test(str)) {
+    return `"${str.replace(/"/g, "\"\"")}"`;
+  }
+  return str;
+}
+
+function orderVotersByWalkingPath(
+  voters: Voter[],
+  geocodedById: Map<string, GeocodedVoter>
+): Voter[] {
+  if (voters.length <= 1) return voters;
+
+  const geocodedPairs = voters
+    .map((voter) => {
+      const geocoded = geocodedById.get(voter.id);
+      return geocoded ? { voter, geocoded } : null;
+    })
+    .filter((pair): pair is { voter: Voter; geocoded: GeocodedVoter } => Boolean(pair));
+
+  if (geocodedPairs.length <= 1) return voters;
+
+  const order = optimizeRouteOrder(geocodedPairs.map((pair) => pair.geocoded));
+  const orderedGeocoded = order.map((idx) => geocodedPairs[idx].voter);
+  const orderedSet = new Set(orderedGeocoded.map((voter) => voter.id));
+  const nonGeocoded = voters.filter((voter) => !orderedSet.has(voter.id));
+
+  return [...orderedGeocoded, ...nonGeocoded];
+}
+
+function buildBalancedGeoPlanAssignments(
+  campaignList: Voter[],
+  geocodedVoters: GeocodedVoter[],
+  days: number
+): Record<string, number> {
+  const safeDays = Math.max(1, Math.floor(days));
+  const assignments: Record<string, number> = {};
+  if (campaignList.length === 0) return assignments;
+
+  const geocodedById = new Map(geocodedVoters.map((voter) => [voter.id, voter]));
+  const geocodedList: GeocodedVoter[] = [];
+
+  for (const voter of campaignList) {
+    const geocoded = geocodedById.get(voter.id);
+    if (geocoded) {
+      geocodedList.push(geocoded);
+    }
+  }
+
+  const baseCapacity = Math.floor(campaignList.length / safeDays);
+  const extraCapacity = campaignList.length % safeDays;
+
+  const capacities = Array.from({ length: safeDays }, (_, idx) =>
+    baseCapacity + (idx < extraCapacity ? 1 : 0)
+  );
+
+  const dayStates = Array.from({ length: safeDays }, (_, idx) => ({
+    day: idx + 1,
+    capacity: capacities[idx],
+    assignedCount: 0,
+  }));
+
+  if (geocodedList.length > 0) {
+    const clusters = clusterVoters(geocodedList, safeDays);
+    const centroids = Array.from(clusters.values())
+      .map((members) => {
+        const lat =
+          members.reduce((sum, voter) => sum + voter.lat, 0) / Math.max(1, members.length);
+        const lng =
+          members.reduce((sum, voter) => sum + voter.lng, 0) / Math.max(1, members.length);
+        return { lat, lng };
+      })
+      .sort((a, b) => (a.lng !== b.lng ? a.lng - b.lng : a.lat - b.lat));
+
+    while (centroids.length < safeDays) {
+      const fallback = geocodedList[centroids.length % geocodedList.length];
+      centroids.push({ lat: fallback.lat, lng: fallback.lng });
+    }
+
+    const remainingCapacities = [...capacities];
+    const geocodedScores = geocodedList
+      .map((voter) => {
+        const distances = centroids.map((centroid) =>
+          haversineDistance(voter.lat, voter.lng, centroid.lat, centroid.lng)
+        );
+        const sorted = [...distances].sort((a, b) => a - b);
+        const spread = (sorted[1] ?? sorted[0] ?? 0) - (sorted[0] ?? 0);
+        return { voter, distances, spread };
+      })
+      .sort((a, b) => b.spread - a.spread);
+
+    for (const { voter, distances } of geocodedScores) {
+      let bestDayIdx = -1;
+      let bestDistance = Infinity;
+
+      for (let dayIdx = 0; dayIdx < safeDays; dayIdx++) {
+        if (remainingCapacities[dayIdx] <= 0) continue;
+        if (distances[dayIdx] < bestDistance) {
+          bestDistance = distances[dayIdx];
+          bestDayIdx = dayIdx;
+        }
+      }
+
+      if (bestDayIdx === -1) {
+        bestDayIdx = 0;
+      }
+
+      assignments[voter.id] = bestDayIdx + 1;
+      remainingCapacities[bestDayIdx] = Math.max(0, remainingCapacities[bestDayIdx] - 1);
+      dayStates[bestDayIdx].assignedCount += 1;
+    }
+  }
+
+  const unassigned = campaignList.filter((voter) => assignments[voter.id] == null);
+  for (const voter of unassigned) {
+    let bestDayIdx = 0;
+    for (let i = 1; i < dayStates.length; i++) {
+      const aRemaining = dayStates[i].capacity - dayStates[i].assignedCount;
+      const bRemaining =
+        dayStates[bestDayIdx].capacity - dayStates[bestDayIdx].assignedCount;
+      if (aRemaining > bRemaining) {
+        bestDayIdx = i;
+      }
+    }
+    assignments[voter.id] = bestDayIdx + 1;
+    dayStates[bestDayIdx].assignedCount += 1;
+  }
+
+  return assignments;
+}
+
+export default function VoterTable() {
+  const voters = useVoterStore((s) => s.voters);
+  const geocodedVoters = useVoterStore((s) => s.geocodedVoters);
+  const filters = useVoterStore((s) => s.filters);
+  const finalizedPlan = useVoterStore((s) => s.finalizedPlan);
+  const setFinalizedPlan = useVoterStore((s) => s.setFinalizedPlan);
+  const clearFinalizedPlan = useVoterStore((s) => s.clearFinalizedPlan);
+  const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [isPlanActive, setIsPlanActive] = useState(() => Boolean(finalizedPlan));
+  const [isPlanFinalized, setIsPlanFinalized] = useState(() => Boolean(finalizedPlan));
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [campaignListIds, setCampaignListIds] = useState<string[]>(
+    () => (finalizedPlan ? Object.keys(finalizedPlan.assignments) : [])
+  );
+  const [campaignDays, setCampaignDays] = useState(() => finalizedPlan?.days ?? 3);
+  const [campaignStartDate, setCampaignStartDate] = useState(() =>
+    finalizedPlan?.startDate ?? toDateInputValue(new Date())
+  );
+
+  const topElections = useMemo(() => getTopElections(voters, 8), [voters]);
+
+  const filtered = useMemo(() => {
+    let result = voters;
+
+    // Apply store filters
+    if (filters.registrationStatus.length > 0) {
+      const statuses = new Set(filters.registrationStatus);
+      result = result.filter((v) => v.registrationStatus && statuses.has(v.registrationStatus));
+    }
+    if (filters.selectedElections.length > 0) {
+      result = result.filter((v) =>
+        filters.selectedElections.every((date) => v.elections.some((e) => e.date === date))
+      );
+    }
+    if (filters.engagementTier !== "all") {
+      result = result.filter(
+        (v) => engagementTier(voterScore(v)) === filters.engagementTier
+      );
+    }
+    if (filters.primaryParty !== "all") {
+      result = result.filter((v) => {
+        if (filters.primaryParty === "unknown") return !v.primaryParty;
+        return v.primaryParty === filters.primaryParty;
+      });
+    }
+
+    // Apply text search
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      result = result.filter(
+        (v) =>
+          `${v.firstName} ${v.lastName}`.toLowerCase().includes(q) ||
+          v.address.toLowerCase().includes(q)
+      );
+    }
+
+    return result;
+  }, [voters, filters, search]);
+
+  const sorted = useMemo(() => {
+    const copy = [...filtered];
+    copy.sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case "name":
+          cmp = `${a.lastName} ${a.firstName}`.localeCompare(
+            `${b.lastName} ${b.firstName}`
+          );
+          break;
+        case "voteCount":
+          cmp = a.voteCount - b.voteCount;
+          break;
+        case "lastVoted": {
+          const aTime = a.lastVoted ? new Date(a.lastVoted).getTime() : 0;
+          const bTime = b.lastVoted ? new Date(b.lastVoted).getTime() : 0;
+          cmp = aTime - bTime;
+          break;
+        }
+      }
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return copy;
+  }, [filtered, sortKey, sortDir]);
+
+  const voterById = useMemo(
+    () => new Map(voters.map((voter) => [voter.id, voter])),
+    [voters]
+  );
+  const geocodedById = useMemo(
+    () => new Map(geocodedVoters.map((voter) => [voter.id, voter])),
+    [geocodedVoters]
+  );
+
+  const validSelectedIds = useMemo(
+    () => selectedIds.filter((id) => voterById.has(id)),
+    [selectedIds, voterById]
+  );
+
+  const selectedIdSet = useMemo(
+    () => new Set(validSelectedIds),
+    [validSelectedIds]
+  );
+
+  const visibleIds = useMemo(() => sorted.map((voter) => voter.id), [sorted]);
+
+  const visibleIdSet = useMemo(
+    () => new Set(visibleIds),
+    [visibleIds]
+  );
+
+  const selectedVisibleCount = useMemo(
+    () => validSelectedIds.filter((id) => visibleIdSet.has(id)).length,
+    [validSelectedIds, visibleIdSet]
+  );
+
+  const allVisibleSelected =
+    visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+
+  const campaignList = useMemo(
+    () =>
+      campaignListIds
+        .map((id) => voterById.get(id))
+        .filter((voter): voter is Voter => Boolean(voter)),
+    [campaignListIds, voterById]
+  );
+
+  const campaignListIdSet = useMemo(
+    () => new Set(campaignList.map((voter) => voter.id)),
+    [campaignList]
+  );
+
+  const selectedInListCount = useMemo(
+    () => validSelectedIds.filter((id) => campaignListIdSet.has(id)).length,
+    [validSelectedIds, campaignListIdSet]
+  );
+
+  const normalizedCampaignDays = Math.max(
+    1,
+    Math.min(MAX_PLAN_DAYS, Number.isFinite(campaignDays) ? campaignDays : 1)
+  );
+
+  const dayPlans = useMemo(() => {
+    if (!isPlanActive || !isPlanFinalized || campaignList.length === 0) return [];
+    const assignments = finalizedPlan?.assignments;
+    if (!assignments) {
+      return buildDayPlans(campaignList, campaignStartDate, normalizedCampaignDays);
+    }
+
+    const byDay = new Map<number, Voter[]>();
+    for (let day = 1; day <= normalizedCampaignDays; day++) {
+      byDay.set(day, []);
+    }
+
+    for (const voter of campaignList) {
+      const assigned = assignments[voter.id];
+      const day =
+        typeof assigned === "number" &&
+        assigned >= 1 &&
+        assigned <= normalizedCampaignDays
+          ? assigned
+          : 1;
+      byDay.get(day)!.push(voter);
+    }
+
+    const startDate = parseDateInput(campaignStartDate);
+    return Array.from({ length: normalizedCampaignDays }, (_, idx) => {
+      const dayNumber = idx + 1;
+      const date = addDays(startDate, idx);
+      const unorderedVoters = byDay.get(dayNumber) || [];
+      const orderedVoters = orderVotersByWalkingPath(unorderedVoters, geocodedById);
+      return {
+        dayNumber,
+        dateValue: toDateInputValue(date),
+        dateLabel: formatCampaignDate(date),
+        voters: orderedVoters,
+      };
+    });
+  }, [
+    campaignList,
+    campaignStartDate,
+    normalizedCampaignDays,
+    isPlanActive,
+    isPlanFinalized,
+    finalizedPlan,
+    geocodedById,
+  ]);
+
+  function toggleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  }
+
+  function sortIndicator(key: SortKey) {
+    if (sortKey !== key) return null;
+    return sortDir === "asc" ? " \u2191" : " \u2193";
+  }
+
+  function toggleRowSelection(id: string) {
+    setSelectedIds((prev) => {
+      const cleaned = prev.filter((current) => voterById.has(current));
+      if (cleaned.includes(id)) {
+        return cleaned.filter((current) => current !== id);
+      }
+      return [...cleaned, id];
+    });
+  }
+
+  function toggleSelectVisible() {
+    setSelectedIds((prev) => {
+      const cleaned = prev.filter((id) => voterById.has(id));
+      if (allVisibleSelected) {
+        return cleaned.filter((id) => !visibleIdSet.has(id));
+      }
+      return mergeUniqueIds(cleaned, visibleIds);
+    });
+  }
+
+  function addFilteredToCampaignList() {
+    setIsPlanFinalized(false);
+    clearFinalizedPlan();
+    setCampaignListIds((prev) => {
+      const cleaned = prev.filter((id) => voterById.has(id));
+      return mergeUniqueIds(cleaned, visibleIds);
+    });
+  }
+
+  function addSelectedToCampaignList() {
+    if (validSelectedIds.length === 0) return;
+    setIsPlanFinalized(false);
+    clearFinalizedPlan();
+    setCampaignListIds((prev) => {
+      const cleaned = prev.filter((id) => voterById.has(id));
+      return mergeUniqueIds(cleaned, validSelectedIds);
+    });
+  }
+
+  function removeSelectedFromCampaignList() {
+    if (validSelectedIds.length === 0) return;
+    setIsPlanFinalized(false);
+    clearFinalizedPlan();
+    setCampaignListIds((prev) => {
+      const selectedSet = new Set(validSelectedIds);
+      return prev.filter((id) => !selectedSet.has(id) && voterById.has(id));
+    });
+  }
+
+  function clearCampaignList() {
+    setIsPlanFinalized(false);
+    clearFinalizedPlan();
+    setCampaignListIds([]);
+  }
+
+  function finalizePlan() {
+    if (campaignList.length === 0) return;
+    const assignments = buildBalancedGeoPlanAssignments(
+      campaignList,
+      geocodedVoters,
+      normalizedCampaignDays
+    );
+
+    setFinalizedPlan({
+      assignments,
+      days: normalizedCampaignDays,
+      startDate: campaignStartDate,
+    });
+    setIsPlanFinalized(true);
+  }
+
+  function exportCampaignPlanCSV() {
+    if (campaignList.length === 0) return;
+
+    const header = [
+      "day",
+      "date",
+      "order",
+      "path_order",
+      "first_name",
+      "last_name",
+      "address",
+      "city",
+      "state",
+      "zip",
+      "lat",
+      "lng",
+      "segment_km",
+      "cumulative_km",
+      "party",
+      "vote_count",
+      "last_voted",
+    ].join(",");
+
+    const rows = dayPlans.flatMap((plan) =>
+      plan.voters.map((voter, idx) => {
+        const geocoded = geocodedById.get(voter.id);
+        const pathOrder = geocoded ? idx + 1 : "";
+
+        let segmentKm = "";
+        let cumulativeKm = "";
+        if (geocoded) {
+          const priorGeocoded = plan.voters
+            .slice(0, idx)
+            .map((candidate) => geocodedById.get(candidate.id))
+            .filter((candidate): candidate is GeocodedVoter => Boolean(candidate));
+
+          if (priorGeocoded.length === 0) {
+            segmentKm = "0";
+            cumulativeKm = "0";
+          } else {
+            const prev = priorGeocoded[priorGeocoded.length - 1];
+            const segment = haversineDistance(prev.lat, prev.lng, geocoded.lat, geocoded.lng);
+            segmentKm = segment.toFixed(3);
+
+            let cumulative = 0;
+            for (let i = 1; i < priorGeocoded.length; i++) {
+              cumulative += haversineDistance(
+                priorGeocoded[i - 1].lat,
+                priorGeocoded[i - 1].lng,
+                priorGeocoded[i].lat,
+                priorGeocoded[i].lng
+              );
+            }
+            cumulative += segment;
+            cumulativeKm = cumulative.toFixed(3);
+          }
+        }
+
+        return [
+          plan.dayNumber,
+          plan.dateValue,
+          idx + 1,
+          pathOrder,
+          csvValue(voter.firstName),
+          csvValue(voter.lastName),
+          csvValue(voter.address),
+          csvValue(voter.city),
+          csvValue(voter.state),
+          csvValue(voter.zip),
+          geocoded ? geocoded.lat.toFixed(6) : "",
+          geocoded ? geocoded.lng.toFixed(6) : "",
+          segmentKm,
+          cumulativeKm,
+          csvValue(voter.party),
+          csvValue(voter.voteCount),
+          csvValue(voter.lastVoted),
+        ].join(",");
+      })
+    );
+
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "campaign-plan.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  if (voters.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-zinc-400">
+        Import voter data to view the table.
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full min-h-0 bg-white">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Toolbar */}
+        <div className="border-b border-zinc-200 px-4 py-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              type="text"
+              placeholder="Search by name or address..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-72 rounded-md border border-zinc-200 px-2.5 py-1.5 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+            />
+            <span className="text-xs text-zinc-400">
+              {filtered.length} of {voters.length} voters
+            </span>
+            {isPlanActive ? (
+              <>
+                <span className="text-xs text-zinc-400">
+                  {selectedVisibleCount} selected in view
+                </span>
+                <span className="text-xs font-medium text-indigo-600">
+                  Campaign list: {campaignList.length}
+                </span>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsPlanActive(true);
+                  setIsPlanFinalized(false);
+                  clearFinalizedPlan();
+                }}
+                className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-indigo-700"
+              >
+                Create Plan
+              </button>
+            )}
+          </div>
+
+          {isPlanActive && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={addFilteredToCampaignList}
+                disabled={visibleIds.length === 0}
+                className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Add Filtered ({visibleIds.length})
+              </button>
+              <button
+                type="button"
+                onClick={addSelectedToCampaignList}
+                disabled={validSelectedIds.length === 0}
+                className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Add Selected ({validSelectedIds.length})
+              </button>
+              <button
+                type="button"
+                onClick={removeSelectedFromCampaignList}
+                disabled={selectedInListCount === 0}
+                className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Remove Selected ({selectedInListCount})
+              </button>
+              <button
+                type="button"
+                onClick={clearCampaignList}
+                disabled={campaignList.length === 0}
+                className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Clear List
+              </button>
+
+              <button
+                type="button"
+                onClick={finalizePlan}
+                disabled={campaignList.length === 0 || isPlanFinalized}
+                className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  isPlanFinalized
+                    ? "border border-emerald-300 bg-emerald-50 text-emerald-700"
+                    : "bg-indigo-600 text-white hover:bg-indigo-700"
+                }`}
+              >
+                {isPlanFinalized ? "Plan Finalized" : "Finalize Plan"}
+              </button>
+
+              <div className="mx-1 h-4 w-px bg-zinc-200" />
+
+              <label className="text-xs text-zinc-500">Days</label>
+              <input
+                type="number"
+                min={1}
+                max={MAX_PLAN_DAYS}
+                value={normalizedCampaignDays}
+                onChange={(e) => {
+                  const parsed = Number(e.target.value);
+                  setIsPlanFinalized(false);
+                  clearFinalizedPlan();
+                  if (!Number.isFinite(parsed)) {
+                    setCampaignDays(1);
+                    return;
+                  }
+                  setCampaignDays(Math.max(1, Math.min(MAX_PLAN_DAYS, Math.round(parsed))));
+                }}
+                className="w-16 rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-700 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              />
+
+              <label className="text-xs text-zinc-500">Start</label>
+              <input
+                type="date"
+                value={campaignStartDate}
+                onChange={(e) => {
+                  setIsPlanFinalized(false);
+                  clearFinalizedPlan();
+                  setCampaignStartDate(e.target.value);
+                }}
+                className="rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-700 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Table */}
+        <div className="flex-1 overflow-auto">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 z-10 bg-zinc-50 text-left">
+              <tr className="border-b border-zinc-200">
+                {isPlanActive && (
+                  <th className="w-8 px-2 py-2">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all visible voters"
+                      checked={allVisibleSelected}
+                      onChange={toggleSelectVisible}
+                      className="h-3.5 w-3.5 rounded border-zinc-300 text-indigo-600"
+                    />
+                  </th>
+                )}
+                <th className="w-8 px-4 py-2" />
+                <th
+                  className="cursor-pointer px-3 py-2 font-medium text-zinc-500 hover:text-zinc-900 select-none"
+                  onClick={() => toggleSort("name")}
+                >
+                  Name{sortIndicator("name")}
+                </th>
+                <th className="px-3 py-2 font-medium text-zinc-500">Address</th>
+                <th className="px-3 py-2 font-medium text-zinc-500">Party</th>
+                <th className="px-3 py-2 font-medium text-zinc-500">Age</th>
+                <th className="px-3 py-2 font-medium text-zinc-500">Status</th>
+                <th
+                  className="cursor-pointer px-3 py-2 font-medium text-zinc-500 hover:text-zinc-900 select-none"
+                  onClick={() => toggleSort("voteCount")}
+                >
+                  Votes{sortIndicator("voteCount")}
+                </th>
+                <th
+                  className="cursor-pointer px-3 py-2 font-medium text-zinc-500 hover:text-zinc-900 select-none"
+                  onClick={() => toggleSort("lastVoted")}
+                >
+                  Last Voted{sortIndicator("lastVoted")}
+                </th>
+                <th className="w-8 px-3 py-2" />
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((voter) => (
+                <VoterRow
+                  key={voter.id}
+                  voter={voter}
+                  topElections={topElections}
+                  selected={selectedIdSet.has(voter.id)}
+                  inCampaignList={campaignListIdSet.has(voter.id)}
+                  planningEnabled={isPlanActive}
+                  expanded={expandedId === voter.id}
+                  onToggleSelection={() => toggleRowSelection(voter.id)}
+                  onToggle={() =>
+                    setExpandedId((prev) =>
+                      prev === voter.id ? null : voter.id
+                    )
+                  }
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {isPlanActive && (
+        <aside className="w-80 shrink-0 border-l border-zinc-200 bg-zinc-50/40">
+          <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2">
+            <div>
+              <h3 className="text-xs font-semibold text-zinc-900">Campaign Plan</h3>
+              <p className="text-[11px] text-zinc-500">
+                {campaignList.length} voters across {normalizedCampaignDays} day
+                {normalizedCampaignDays === 1 ? "" : "s"}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={exportCampaignPlanCSV}
+              disabled={campaignList.length === 0 || !isPlanFinalized}
+              className="rounded-md border border-zinc-200 bg-white px-2 py-1 text-[11px] font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Export CSV
+            </button>
+          </div>
+
+          <div className="h-full overflow-y-auto p-3">
+            {campaignList.length === 0 ? (
+              <p className="text-xs text-zinc-400">
+                Filter voters, select rows, and add them to the campaign list.
+              </p>
+            ) : !isPlanFinalized ? (
+              <p className="text-xs text-zinc-400">
+                Set your days and start date, then click <span className="font-medium text-zinc-500">Finalize Plan</span> to generate day assignments.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-3 pb-12">
+                {dayPlans.map((plan) => (
+                  <section
+                    key={`${plan.dayNumber}-${plan.dateValue}`}
+                    className="rounded-md border border-zinc-200 bg-white"
+                  >
+                    <div className="flex items-center justify-between border-b border-zinc-100 px-3 py-2">
+                      <div>
+                        <p className="text-xs font-semibold text-zinc-800">
+                          Day {plan.dayNumber}
+                        </p>
+                        <p className="text-[11px] text-zinc-500">{plan.dateLabel}</p>
+                      </div>
+                      <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-600">
+                        {plan.voters.length}
+                      </span>
+                    </div>
+
+                    {plan.voters.length > 0 ? (
+                      <ul className="flex flex-col gap-1 px-3 py-2">
+                        {plan.voters.slice(0, PLAN_PREVIEW_LIMIT).map((voter) => (
+                          <li key={voter.id} className="text-[11px] text-zinc-600">
+                            {voter.firstName} {voter.lastName}
+                          </li>
+                        ))}
+                        {plan.voters.length > PLAN_PREVIEW_LIMIT && (
+                          <li className="text-[11px] text-zinc-400">
+                            +{plan.voters.length - PLAN_PREVIEW_LIMIT} more
+                          </li>
+                        )}
+                      </ul>
+                    ) : (
+                      <p className="px-3 py-2 text-[11px] text-zinc-400">
+                        No voters assigned.
+                      </p>
+                    )}
+                  </section>
+                ))}
+              </div>
+            )}
+          </div>
+        </aside>
+      )}
+    </div>
+  );
+}
+
+function VoterRow({
+  voter,
+  topElections,
+  selected,
+  inCampaignList,
+  planningEnabled,
+  expanded,
+  onToggleSelection,
+  onToggle,
+}: {
+  voter: Voter;
+  topElections: Election[];
+  selected: boolean;
+  inCampaignList: boolean;
+  planningEnabled: boolean;
+  expanded: boolean;
+  onToggleSelection: () => void;
+  onToggle: () => void;
+}) {
+  const score = voterScore(voter);
+  const tier = engagementTier(score);
+  const color = ENGAGEMENT_COLORS[tier];
+
+  return (
+    <>
+      <tr
+        className={`cursor-pointer border-b border-zinc-100 transition-colors ${
+          planningEnabled && inCampaignList
+            ? "bg-indigo-50/40 hover:bg-indigo-50/70"
+            : "hover:bg-zinc-50"
+        }`}
+        onClick={onToggle}
+      >
+        {planningEnabled && (
+          <td
+            className="px-2 py-2"
+            onClick={(e) => {
+              e.stopPropagation();
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={onToggleSelection}
+              className="h-3.5 w-3.5 rounded border-zinc-300 text-indigo-600"
+              aria-label={`Select ${voter.firstName} ${voter.lastName}`}
+            />
+          </td>
+        )}
+
+        {/* Engagement dot */}
+        <td className="px-4 py-2">
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-full"
+            style={{ backgroundColor: color }}
+          />
+        </td>
+
+        {/* Name */}
+        <td className="px-3 py-2 font-medium text-zinc-900">
+          <span>{voter.firstName} {voter.lastName}</span>
+          {planningEnabled && inCampaignList && (
+            <span className="ml-2 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+              Planned
+            </span>
+          )}
+        </td>
+
+        {/* Address */}
+        <td className="px-3 py-2 text-zinc-500">
+          {voter.address}, {voter.city}
+        </td>
+
+        {/* Party */}
+        <td className="px-3 py-2 text-zinc-500">{voter.party || "—"}</td>
+
+        {/* Age */}
+        <td className="px-3 py-2 text-zinc-500">{voter.age || "—"}</td>
+
+        {/* Registration status */}
+        <td className="px-3 py-2">
+          {voter.registrationStatus ? (
+            <span
+              className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                voter.registrationStatus === "Active"
+                  ? "bg-emerald-50 text-emerald-700"
+                  : "bg-red-50 text-red-600"
+              }`}
+            >
+              {voter.registrationStatus}
+            </span>
+          ) : (
+            "—"
+          )}
+        </td>
+
+        {/* Vote count */}
+        <td className="px-3 py-2 text-zinc-500">{voter.voteCount}</td>
+
+        {/* Last voted */}
+        <td className="px-3 py-2 text-zinc-500">
+          {voter.lastVoted
+            ? new Date(voter.lastVoted).toLocaleDateString("en-US", {
+                month: "short",
+                year: "numeric",
+              })
+            : "—"}
+        </td>
+
+        {/* Chevron */}
+        <td className="px-3 py-2 text-zinc-400">
+          <svg
+            className={`h-4 w-4 transition-transform ${expanded ? "rotate-180" : ""}`}
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+          </svg>
+        </td>
+      </tr>
+
+      {/* Expanded detail */}
+      {expanded && (
+        <tr className="border-b border-zinc-100 bg-zinc-50/50">
+          <td colSpan={planningEnabled ? 10 : 9} className="px-6 py-3">
+            <ElectionDetail voter={voter} topElections={topElections} />
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function ElectionDetail({
+  voter,
+  topElections,
+}: {
+  voter: Voter;
+  topElections: Election[];
+}) {
+  const uniqueElections = useMemo(() => {
+    const seen = new Set<string>();
+    return voter.elections.filter((e) => {
+      const key = `${e.date}|${e.type || ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [voter.elections]);
+
+  const voterDates = new Set(voter.elections.map((e) => e.date));
+  const hasTopElections = topElections.length > 0;
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Election participation grid */}
+      {hasTopElections && (
+        <div>
+          <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-400">
+            Recent Elections
+          </p>
+          <div className="flex items-center gap-3">
+            {topElections.map((e) => (
+              <div key={e.date} className="flex flex-col items-center gap-1">
+                <span
+                  className="inline-block h-3 w-3 rounded-full"
+                  style={{
+                    backgroundColor: voterDates.has(e.date)
+                      ? "#18181b"
+                      : "transparent",
+                    border: voterDates.has(e.date)
+                      ? "none"
+                      : "1.5px solid #d4d4d8",
+                  }}
+                />
+                <span className="text-[9px] text-zinc-400">
+                  {shortElectionLabel(e)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Full election list */}
+      {uniqueElections.length > 0 && (
+        <div>
+          <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-zinc-400">
+            All Elections ({uniqueElections.length})
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {uniqueElections
+              .slice()
+              .sort(
+                (a, b) =>
+                  new Date(b.date).getTime() - new Date(a.date).getTime()
+              )
+              .map((e, idx) => (
+                <span
+                  key={`${e.date}-${e.type || "unknown"}-${idx}`}
+                  className="rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-600"
+                >
+                  {shortElectionLabel(e)}
+                </span>
+              ))}
+          </div>
+        </div>
+      )}
+
+      {/* Additional details */}
+      <div className="flex gap-6 text-[10px] text-zinc-400">
+        <span>
+          Full address: {voter.address}, {voter.city}, {voter.state}{" "}
+          {voter.zip}
+        </span>
+        {voter.party && <span>Party: {voter.party}</span>}
+        {voter.age && <span>Age: {voter.age}</span>}
+      </div>
+    </div>
+  );
+}

@@ -33,6 +33,16 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# data files
+data/
+
+# playwright
+.playwright-mcp/
+
+# misc artifacts
+badroute.png
+__pycache__/
+
 # vercel
 .vercel
 
