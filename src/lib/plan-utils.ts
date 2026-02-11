@@ -6,6 +6,17 @@ import { optimizeRouteOrder, type RouteTravelMode } from "@/lib/route-optimizer"
 export const MAX_PLAN_DAYS = 30;
 export const PLAN_PREVIEW_LIMIT = 6;
 
+export interface GoogleMapsLinkInput {
+  address: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  lat?: number | null;
+  lng?: number | null;
+  travelMode?: RouteTravelMode;
+  directions?: boolean;
+}
+
 export interface DayPlan {
   dayNumber: number;
   dateValue: string;
@@ -62,6 +73,34 @@ export function csvValue(value: string | number | null | undefined): string {
     return `"${str.replace(/"/g, '""')}"`;
   }
   return str;
+}
+
+function addressQuery(input: GoogleMapsLinkInput): string {
+  const parts = [input.address, input.city, input.state, input.zip]
+    .map((part) => (part ?? "").trim())
+    .filter((part) => part.length > 0);
+  return parts.join(", ");
+}
+
+export function buildGoogleMapsUrl(input: GoogleMapsLinkInput): string {
+  const hasCoords =
+    typeof input.lat === "number" &&
+    Number.isFinite(input.lat) &&
+    typeof input.lng === "number" &&
+    Number.isFinite(input.lng);
+
+  const destination = hasCoords
+    ? `${input.lat},${input.lng}`
+    : addressQuery(input);
+  const encodedDestination = encodeURIComponent(destination);
+
+  if (input.directions) {
+    const travelMode =
+      input.travelMode === "driving" ? "driving" : "walking";
+    return `https://www.google.com/maps/dir/?api=1&destination=${encodedDestination}&travelmode=${travelMode}`;
+  }
+
+  return `https://www.google.com/maps/search/?api=1&query=${encodedDestination}`;
 }
 
 export function orderVotersByWalkingPath(

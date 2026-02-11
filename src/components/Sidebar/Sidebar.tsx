@@ -4,6 +4,12 @@ import { useMemo } from "react";
 import { useVoterStore } from "@/store/voter-store";
 import { getTopElections, shortElectionLabel } from "@/lib/scoring";
 
+const PRIMARY_VOTING_METHOD_OPTIONS = [
+  { value: "EV", label: "Early Voting" },
+  { value: "ED", label: "Election Day" },
+  { value: "AV", label: "Absentee" },
+] as const;
+
 function SegmentedControl<T extends string>({
   options,
   value,
@@ -147,14 +153,36 @@ export default function Sidebar() {
     reset,
   } = useVoterStore();
 
+  const selectedPrimaryMethods = useMemo(
+    () => filters.primaryVotingMethods ?? [],
+    [filters.primaryVotingMethods]
+  );
+  const selectedPrimaryMethodSet = useMemo(
+    () => new Set(selectedPrimaryMethods),
+    [selectedPrimaryMethods]
+  );
+
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (filters.registrationStatus.length > 0) count++;
     if (filters.selectedElections.length > 0) count++;
     if (filters.engagementTier !== "all") count++;
     if (filters.primaryParty !== "all") count++;
+    if (selectedPrimaryMethods.length > 0) count++;
     return count;
-  }, [filters]);
+  }, [filters, selectedPrimaryMethods.length]);
+
+  function togglePrimaryMethod(method: (typeof PRIMARY_VOTING_METHOD_OPTIONS)[number]["value"]) {
+    if (selectedPrimaryMethodSet.has(method)) {
+      setFilters({
+        primaryVotingMethods: selectedPrimaryMethods.filter((value) => value !== method),
+      });
+      return;
+    }
+    setFilters({
+      primaryVotingMethods: [...selectedPrimaryMethods, method],
+    });
+  }
 
   function handleExportCSV() {
     if (routes.length === 0) return;
@@ -282,6 +310,35 @@ export default function Sidebar() {
                 selected={filters.selectedElections}
                 onChange={(v) => setFilters({ selectedElections: v })}
               />
+
+              <div>
+                <label className="mb-1.5 block font-semibold text-zinc-700">
+                  Primary Voting Method
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {PRIMARY_VOTING_METHOD_OPTIONS.map((option) => {
+                    const active = selectedPrimaryMethodSet.has(option.value);
+                    return (
+                      <button
+                        key={option.value}
+                        onClick={() => togglePrimaryMethod(option.value)}
+                        className={`rounded-full px-2 py-1 text-[11px] font-medium transition-colors ${
+                          active
+                            ? "bg-indigo-600 text-white"
+                            : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
+                        }`}
+                      >
+                        {option.label} ({option.value})
+                      </button>
+                    );
+                  })}
+                </div>
+                {selectedPrimaryMethods.length > 0 && filters.selectedElections.length > 0 && (
+                  <p className="mt-1.5 text-[10px] text-zinc-400">
+                    Method matches are scoped to selected election year(s).
+                  </p>
+                )}
+              </div>
 
               <div>
                 <label className="mb-1.5 block font-semibold text-zinc-700">

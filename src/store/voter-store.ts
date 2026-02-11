@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { Voter, GeocodedVoter, WalkerRoute, PipelineStage } from "@/lib/types";
+import { Voter, GeocodedVoter, WalkerRoute, PipelineStage, PrimaryVotingMethod } from "@/lib/types";
 import { NUM_WALKERS } from "@/lib/constants";
 
 export interface VoterFilters {
@@ -8,6 +8,7 @@ export interface VoterFilters {
   selectedElections: string[];
   engagementTier: "all" | "high" | "medium" | "low" | "none";
   primaryParty: "all" | "R" | "D" | "unknown";
+  primaryVotingMethods: PrimaryVotingMethod[];
 }
 
 export interface FinalizedCampaignPlan {
@@ -23,6 +24,7 @@ const DEFAULT_FILTERS: VoterFilters = {
   selectedElections: [],
   engagementTier: "all",
   primaryParty: "all",
+  primaryVotingMethods: [],
 };
 
 interface VoterStore {
@@ -162,7 +164,13 @@ export const useVoterStore = create<VoterStore>()(
         set(updates);
       },
       setFilters: (partial) =>
-        set((state) => ({ filters: { ...state.filters, ...partial } })),
+        set((state) => ({
+          filters: {
+            ...DEFAULT_FILTERS,
+            ...state.filters,
+            ...partial,
+          },
+        })),
       setSelectedScrapes: (scrapes) => set({ selectedScrapes: scrapes }),
       setFinalizedPlan: (plan) =>
         set({
@@ -238,25 +246,46 @@ export const useVoterStore = create<VoterStore>()(
     }),
     {
       name: "vote-mapper-storage",
+      merge: (persistedState, currentState) => {
+        const persisted = (persistedState || {}) as Partial<VoterStore>;
+        return {
+          ...currentState,
+          numWalkers:
+            typeof persisted.numWalkers === "number"
+              ? persisted.numWalkers
+              : currentState.numWalkers,
+          selectedScrapes: Array.isArray(persisted.selectedScrapes)
+            ? persisted.selectedScrapes
+            : currentState.selectedScrapes,
+          campaignDays:
+            typeof persisted.campaignDays === "number"
+              ? persisted.campaignDays
+              : currentState.campaignDays,
+          campaignStartDate:
+            typeof persisted.campaignStartDate === "string"
+              ? persisted.campaignStartDate
+              : currentState.campaignStartDate,
+          doorsPerDay:
+            typeof persisted.doorsPerDay === "number"
+              ? persisted.doorsPerDay
+              : currentState.doorsPerDay,
+          filters: {
+            ...DEFAULT_FILTERS,
+            ...(persisted.filters || {}),
+          },
+        };
+      },
       onRehydrateStorage: () => (state) => {
         state?.resetPlanBuilding();
         state?.setHasHydrated(true);
       },
       partialize: (state) => ({
-        voters: state.voters,
-        geocodedVoters: state.geocodedVoters,
-        unmatchedVoters: state.unmatchedVoters,
-        routes: state.routes,
-        stage: state.stage,
-        importErrors: state.importErrors,
         numWalkers: state.numWalkers,
         selectedScrapes: state.selectedScrapes,
-        finalizedPlan: state.finalizedPlan,
-        campaignListIds: state.campaignListIds,
+        filters: state.filters,
         campaignDays: state.campaignDays,
         campaignStartDate: state.campaignStartDate,
         doorsPerDay: state.doorsPerDay,
-        planBuilding: state.planBuilding,
       }),
     }
   )

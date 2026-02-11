@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseCSV, parseHistoryCSV, parseRepPrimaryCSVs } from "@/lib/csv-parser";
+import { parseCSV, parseHistoryCSV, parseRepPrimaryCSVs, RepPrimaryData } from "@/lib/csv-parser";
 import fs from "fs/promises";
 import path from "path";
 import type { Election, GeocodedVoter, Voter } from "@/lib/types";
@@ -40,16 +40,19 @@ export async function POST(request: NextRequest) {
     }
 
     // Auto-load rep primary CSVs from data/rep_primary_data/.
-    let repPrimaryNames: Set<string> | undefined;
+    let repPrimaryData: RepPrimaryData | undefined;
     try {
       const repDir = path.join(process.cwd(), "data", "rep_primary_data");
       const files = await fs.readdir(repDir);
       const csvFiles = files.filter((f) => f.endsWith(".csv"));
       if (csvFiles.length > 0) {
-        const csvTexts = await Promise.all(
-          csvFiles.map((f) => fs.readFile(path.join(repDir, f), "utf-8"))
+        const csvSources = await Promise.all(
+          csvFiles.map(async (filename) => ({
+            filename,
+            csvText: await fs.readFile(path.join(repDir, filename), "utf-8"),
+          }))
         );
-        repPrimaryNames = parseRepPrimaryCSVs(csvTexts);
+        repPrimaryData = parseRepPrimaryCSVs(csvSources);
       }
     } catch {
       // No rep_primary_data directory — that's fine
@@ -86,7 +89,7 @@ export async function POST(request: NextRequest) {
           // No companion history file — that's fine.
         }
 
-        const parsed = parseCSV(text, historyMap, repPrimaryNames);
+        const parsed = parseCSV(text, historyMap, repPrimaryData);
         if (parsed.errors.length > 0) {
           errors.push(...parsed.errors.map((err) => `${safeName}: ${err}`));
         }
@@ -105,7 +108,7 @@ export async function POST(request: NextRequest) {
         }
       }
     } else {
-      const parsed = parseCSV(body.csvText, inlineHistoryMap, repPrimaryNames);
+      const parsed = parseCSV(body.csvText, inlineHistoryMap, repPrimaryData);
       voters = parsed.voters;
       geocodedVoters = parsed.geocodedVoters;
       errors = parsed.errors;
@@ -121,7 +124,7 @@ export async function POST(request: NextRequest) {
       geocodedVoters,
       errors,
       count: voters.length,
-      repPrimaryCount: repPrimaryNames?.size ?? 0,
+      repPrimaryCount: repPrimaryData?.names.size ?? 0,
       rCount,
       dCount,
       unknownCount,

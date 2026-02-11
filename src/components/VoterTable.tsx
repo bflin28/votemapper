@@ -24,6 +24,7 @@ import {
   buildBalancedGeoPlanAssignments,
   buildDayPlans,
 } from "@/lib/plan-utils";
+import { matchesPrimaryMethodFilter } from "@/lib/primary-vote";
 
 type SortKey = "name" | "voteCount" | "lastVoted";
 type SortDir = "asc" | "desc";
@@ -66,6 +67,10 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
   const finalizedTravelMode = finalizedPlan?.travelMode ?? "walking";
 
   const topElections = useMemo(() => getTopElections(voters, 8), [voters]);
+  const selectedPrimaryMethods = useMemo(
+    () => filters.primaryVotingMethods ?? [],
+    [filters.primaryVotingMethods]
+  );
 
   const filtered = useMemo(() => {
     let result = voters;
@@ -90,6 +95,15 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
         return v.primaryParty === filters.primaryParty;
       });
     }
+    if (selectedPrimaryMethods.length > 0) {
+      result = result.filter((voter) =>
+        matchesPrimaryMethodFilter(
+          voter,
+          selectedPrimaryMethods,
+          filters.selectedElections
+        )
+      );
+    }
 
     if (search.trim()) {
       const q = search.toLowerCase();
@@ -101,7 +115,7 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
     }
 
     return result;
-  }, [voters, filters, search]);
+  }, [voters, filters, selectedPrimaryMethods, search]);
 
   const sorted = useMemo(() => {
     const copy = [...filtered];

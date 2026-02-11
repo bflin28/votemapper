@@ -3,6 +3,13 @@ export interface Election {
   type: string;
 }
 
+export type PrimaryVotingMethod = "EV" | "ED" | "AV";
+
+export interface RepPrimaryVoteRecord {
+  year: number;
+  method: PrimaryVotingMethod;
+}
+
 export interface Voter {
   id: string;
   firstName: string;
@@ -18,6 +25,7 @@ export interface Voter {
   elections: Election[];
   registrationStatus: string | null;
   primaryParty?: "R" | "D" | null;
+  repPrimaryVotes?: RepPrimaryVoteRecord[];
 }
 
 export interface GeocodedVoter extends Voter {

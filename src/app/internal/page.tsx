@@ -20,7 +20,7 @@ export default function InternalTool() {
   return (
     <div className="flex h-screen w-screen overflow-hidden print:block print:h-auto print:w-auto print:overflow-visible">
       {showSidebar && (
-        <div className="print:hidden">
+        <div className="hidden print:hidden md:block">
           <Sidebar />
         </div>
       )}

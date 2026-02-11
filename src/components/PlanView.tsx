@@ -13,6 +13,7 @@ import {
   formatCampaignDate,
   csvValue,
   orderVotersByWalkingPath,
+  buildGoogleMapsUrl,
 } from "@/lib/plan-utils";
 import VoterTable from "@/components/VoterTable";
 
@@ -159,8 +160,12 @@ function PlanWizard() {
     }
 
     const persistedSelection = selectedScrapes.filter((name) => availableFileNames.has(name));
+    const hasRepPrimaryDecoration = voters.some((voter) =>
+      Array.isArray(voter.repPrimaryVotes)
+    );
     const shouldImport =
       voters.length === 0 ||
+      !hasRepPrimaryDecoration ||
       validSelection.length !== persistedSelection.length ||
       validSelection.some((name) => !persistedSelection.includes(name));
 
@@ -509,6 +514,9 @@ function PlanSummary() {
   const clearFinalizedPlan = useVoterStore((s) => s.clearFinalizedPlan);
   const setPlanBuilding = useVoterStore((s) => s.setPlanBuilding);
   const resetPlanBuilding = useVoterStore((s) => s.resetPlanBuilding);
+  const setFinalizedPlanActiveDay = useVoterStore(
+    (s) => s.setFinalizedPlanActiveDay
+  );
 
   const voterById = useMemo(
     () => new Map(voters.map((v) => [v.id, v])),
@@ -588,15 +596,22 @@ function PlanSummary() {
           city: string;
           state: string;
           zip: string;
+          lat: number | null;
+          lng: number | null;
           voters: Voter[];
         }
       >();
 
       for (const voter of plan.voters) {
         const key = `${voter.address.toLowerCase().trim()}|${voter.city.toLowerCase().trim()}|${voter.state.toLowerCase().trim()}|${voter.zip.trim()}`;
+        const geocoded = geocodedById.get(voter.id);
         const existing = stopMap.get(key);
         if (existing) {
           existing.voters.push(voter);
+          if ((existing.lat == null || existing.lng == null) && geocoded) {
+            existing.lat = geocoded.lat;
+            existing.lng = geocoded.lng;
+          }
         } else {
           stopMap.set(key, {
             stopNumber: stopMap.size + 1,
@@ -604,6 +619,8 @@ function PlanSummary() {
             city: voter.city,
             state: voter.state,
             zip: voter.zip,
+            lat: geocoded?.lat ?? null,
+            lng: geocoded?.lng ?? null,
             voters: [voter],
           });
         }
@@ -614,7 +631,35 @@ function PlanSummary() {
         stops: Array.from(stopMap.values()),
       };
     });
-  }, [dayPlans]);
+  }, [dayPlans, geocodedById]);
+
+  const [selectedDayNumber, setSelectedDayNumber] = useState(1);
+
+  useEffect(() => {
+    if (dayPrintSheets.length === 0) return;
+
+    if (finalizedPlan.activeDay !== "all") {
+      setSelectedDayNumber(finalizedPlan.activeDay);
+      return;
+    }
+
+    const firstDay = dayPrintSheets[0].dayNumber;
+    setSelectedDayNumber((current) => current || firstDay);
+  }, [dayPrintSheets, finalizedPlan.activeDay]);
+
+  useEffect(() => {
+    if (dayPrintSheets.length === 0) return;
+    if (dayPrintSheets.some((plan) => plan.dayNumber === selectedDayNumber)) return;
+    setSelectedDayNumber(dayPrintSheets[0].dayNumber);
+  }, [dayPrintSheets, selectedDayNumber]);
+
+  const selectedDayPlan = useMemo(() => {
+    if (dayPrintSheets.length === 0) return null;
+    return (
+      dayPrintSheets.find((plan) => plan.dayNumber === selectedDayNumber) ||
+      dayPrintSheets[0]
+    );
+  }, [dayPrintSheets, selectedDayNumber]);
 
   const startDateObj = parseDateInput(campaignStartDate);
   const endDateObj = addDays(startDateObj, normalizedDays - 1);
@@ -695,18 +740,27 @@ function PlanSummary() {
     window.print();
   }
 
+  function handleSelectDay(dayNumber: number) {
+    setSelectedDayNumber(dayNumber);
+    setFinalizedPlanActiveDay(dayNumber);
+  }
+
+  function showAllDaysOnMap() {
+    setFinalizedPlanActiveDay("all");
+  }
+
   return (
     <div className="flex h-full flex-col bg-zinc-50 print:bg-white">
       {/* Header */}
-      <div className="border-b border-zinc-200 bg-white px-6 py-4 print:hidden">
-        <div className="flex items-center justify-between">
+      <div className="border-b border-zinc-200 bg-white px-4 py-3 print:hidden sm:px-6 sm:py-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-base font-semibold text-zinc-900">Campaign Plan</h2>
             <p className="mt-0.5 text-xs text-zinc-500">
               {dateRange} &middot; {campaignList.length} voters
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={printDaySheets}
@@ -725,50 +779,194 @@ function PlanSummary() {
         </div>
       </div>
 
-      {/* Day cards grid */}
-      <div className="flex-1 overflow-y-auto p-6 print:hidden">
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {dayPlans.map((plan) => (
-            <section
-              key={`${plan.dayNumber}-${plan.dateValue}`}
-              className="rounded-lg border border-zinc-200 bg-white"
-            >
-              <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3">
+      <div className="flex-1 overflow-y-auto p-3 print:hidden sm:p-6">
+        <div className="mx-auto w-full max-w-5xl space-y-4">
+          <section className="rounded-xl border border-zinc-200 bg-white shadow-sm">
+            <div className="border-b border-zinc-100 px-3 py-3 sm:px-4">
+              <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-sm font-semibold text-zinc-800">
-                    Day {plan.dayNumber}
+                  <h3 className="text-sm font-semibold text-zinc-900">Day-by-Day Route</h3>
+                  <p className="mt-0.5 text-xs text-zinc-500">
+                    Tap a day, then open each stop directly in Google Maps.
                   </p>
-                  <p className="text-xs text-zinc-500">{plan.dateLabel}</p>
                 </div>
-                <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-600">
-                  {plan.voters.length}
-                </span>
+                <button
+                  type="button"
+                  onClick={showAllDaysOnMap}
+                  className={`rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                    finalizedPlan.activeDay === "all"
+                      ? "border-indigo-200 bg-indigo-50 text-indigo-700"
+                      : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
+                  }`}
+                >
+                  {finalizedPlan.activeDay === "all"
+                    ? "Map: All Days"
+                    : `Map: Day ${finalizedPlan.activeDay}`}
+                </button>
               </div>
 
-              {plan.voters.length > 0 ? (
-                <ul className="flex flex-col gap-1 px-4 py-3">
-                  {plan.voters.slice(0, PLAN_PREVIEW_LIMIT).map((voter) => (
-                    <li key={voter.id} className="text-xs text-zinc-600">
-                      {voter.firstName} {voter.lastName}
-                    </li>
-                  ))}
-                  {plan.voters.length > PLAN_PREVIEW_LIMIT && (
-                    <li className="text-xs text-zinc-400">
-                      +{plan.voters.length - PLAN_PREVIEW_LIMIT} more
-                    </li>
+              <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                {dayPrintSheets.map((plan) => (
+                  <button
+                    key={`mobile-day-${plan.dayNumber}`}
+                    type="button"
+                    onClick={() => handleSelectDay(plan.dayNumber)}
+                    className={`shrink-0 rounded-md border px-3 py-1.5 text-left transition-colors ${
+                      selectedDayPlan?.dayNumber === plan.dayNumber
+                        ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+                        : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
+                    }`}
+                  >
+                    <p className="text-xs font-semibold">Day {plan.dayNumber}</p>
+                    <p className="text-[11px]">{plan.dateLabel}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="px-3 py-3 sm:px-4">
+              {selectedDayPlan ? (
+                <>
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-zinc-800">
+                        Day {selectedDayPlan.dayNumber}
+                      </p>
+                      <p className="text-xs text-zinc-500">{selectedDayPlan.dateLabel}</p>
+                    </div>
+                    <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-600">
+                      {selectedDayPlan.stops.length} stop
+                      {selectedDayPlan.stops.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+
+                  {selectedDayPlan.stops.length === 0 ? (
+                    <p className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-500">
+                      No assigned voters for this day.
+                    </p>
+                  ) : (
+                    <ol className="space-y-2.5">
+                      {selectedDayPlan.stops.map((stop) => {
+                        const mapsUrl = buildGoogleMapsUrl({
+                          address: stop.address,
+                          city: stop.city,
+                          state: stop.state,
+                          zip: stop.zip,
+                          lat: stop.lat,
+                          lng: stop.lng,
+                          travelMode: finalizedTravelMode,
+                          directions: true,
+                        });
+
+                        return (
+                          <li
+                            key={`mobile-stop-${selectedDayPlan.dayNumber}-${stop.stopNumber}`}
+                            className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-3"
+                          >
+                            <div className="flex items-start gap-2">
+                              <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-xs font-semibold text-white">
+                                {stop.stopNumber}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <p className="truncate text-sm font-semibold text-zinc-900">
+                                  {stop.address}
+                                </p>
+                                <p className="text-xs text-zinc-500">
+                                  {stop.city}, {stop.state} {stop.zip}
+                                </p>
+                                <p className="mt-1 text-[11px] text-zinc-500">
+                                  {stop.voters.length} voter
+                                  {stop.voters.length === 1 ? "" : "s"}
+                                </p>
+                              </div>
+                              <a
+                                href={mapsUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="shrink-0 rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-700 transition-colors hover:bg-indigo-100"
+                              >
+                                Open Map
+                              </a>
+                            </div>
+
+                            {stop.voters.length > 0 && (
+                              <ul className="mt-2 flex flex-wrap gap-1">
+                                {stop.voters.slice(0, PLAN_PREVIEW_LIMIT).map((voter) => (
+                                  <li
+                                    key={`mobile-stop-voter-${stop.stopNumber}-${voter.id}`}
+                                    className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[11px] text-zinc-600"
+                                  >
+                                    {voter.firstName} {voter.lastName}
+                                  </li>
+                                ))}
+                                {stop.voters.length > PLAN_PREVIEW_LIMIT && (
+                                  <li className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[11px] text-zinc-500">
+                                    +{stop.voters.length - PLAN_PREVIEW_LIMIT} more
+                                  </li>
+                                )}
+                              </ul>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ol>
                   )}
-                </ul>
+                </>
               ) : (
-                <p className="px-4 py-3 text-xs text-zinc-400">No voters assigned.</p>
+                <p className="text-xs text-zinc-500">No campaign days available.</p>
               )}
-            </section>
-          ))}
+            </div>
+          </section>
+
+          <section className="hidden grid-cols-1 gap-4 md:grid md:grid-cols-2 xl:grid-cols-3">
+            {dayPlans.map((plan) => (
+              <button
+                key={`${plan.dayNumber}-${plan.dateValue}`}
+                type="button"
+                onClick={() => handleSelectDay(plan.dayNumber)}
+                className={`rounded-lg border bg-white text-left transition-colors ${
+                  selectedDayPlan?.dayNumber === plan.dayNumber
+                    ? "border-indigo-300 shadow-sm"
+                    : "border-zinc-200 hover:border-zinc-300"
+                }`}
+              >
+                <div className="flex items-center justify-between border-b border-zinc-100 px-4 py-3">
+                  <div>
+                    <p className="text-sm font-semibold text-zinc-800">
+                      Day {plan.dayNumber}
+                    </p>
+                    <p className="text-xs text-zinc-500">{plan.dateLabel}</p>
+                  </div>
+                  <span className="rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-600">
+                    {plan.voters.length}
+                  </span>
+                </div>
+
+                {plan.voters.length > 0 ? (
+                  <ul className="flex flex-col gap-1 px-4 py-3">
+                    {plan.voters.slice(0, PLAN_PREVIEW_LIMIT).map((voter) => (
+                      <li key={voter.id} className="text-xs text-zinc-600">
+                        {voter.firstName} {voter.lastName}
+                      </li>
+                    ))}
+                    {plan.voters.length > PLAN_PREVIEW_LIMIT && (
+                      <li className="text-xs text-zinc-400">
+                        +{plan.voters.length - PLAN_PREVIEW_LIMIT} more
+                      </li>
+                    )}
+                  </ul>
+                ) : (
+                  <p className="px-4 py-3 text-xs text-zinc-400">No voters assigned.</p>
+                )}
+              </button>
+            ))}
+          </section>
         </div>
       </div>
 
       {/* Footer */}
-      <div className="border-t border-zinc-200 bg-white px-6 py-3 print:hidden">
-        <div className="flex items-center gap-3">
+      <div className="border-t border-zinc-200 bg-white px-4 py-3 print:hidden sm:px-6">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={handleEditPlan}

@@ -1,5 +1,11 @@
 import Papa from "papaparse";
-import { Voter, GeocodedVoter, Election } from "./types";
+import { Voter, GeocodedVoter, Election, RepPrimaryVoteRecord } from "./types";
+import {
+  dedupePrimaryVoteRecords,
+  parsePrimaryVotingMethod,
+  parseYearFromFilename,
+  parseYearFromText,
+} from "./primary-vote";
 
 const COLUMN_ALIASES: Record<string, string[]> = {
   firstName: ["first_name", "firstname", "first name", "fname", "first"],
@@ -30,11 +36,21 @@ export function normalizeName(name: string): string {
   return words.join(" ");
 }
 
-/** Parse county-format rep primary CSVs and return a Set of normalized voter names */
-export function parseRepPrimaryCSVs(csvTexts: string[]): Set<string> {
+export interface RepPrimaryData {
+  names: Set<string>;
+  votesByName: Map<string, RepPrimaryVoteRecord[]>;
+}
+
+/** Parse county-format rep primary CSVs and return normalized name and method/year decorations */
+export function parseRepPrimaryCSVs(
+  csvSources: Array<{ filename: string; csvText: string }>
+): RepPrimaryData {
   const names = new Set<string>();
-  for (const text of csvTexts) {
-    const result = Papa.parse(text, {
+  const votesByName = new Map<string, RepPrimaryVoteRecord[]>();
+
+  for (const source of csvSources) {
+    const fallbackYear = parseYearFromFilename(source.filename);
+    const result = Papa.parse(source.csvText, {
       header: true,
       skipEmptyLines: true,
       transformHeader: (h: string) => h.trim(),
@@ -43,11 +59,30 @@ export function parseRepPrimaryCSVs(csvTexts: string[]): Set<string> {
     for (const row of rows) {
       const voterName = (row["Voter Name"] || "").trim();
       if (voterName) {
-        names.add(normalizeName(voterName));
+        const normalizedName = normalizeName(voterName);
+        names.add(normalizedName);
+
+        const method = parsePrimaryVotingMethod(row["Voting Method 1"]);
+        const year =
+          parseYearFromText(row["Ballot Date 1"]) ??
+          parseYearFromText(row["Election Name 1"]) ??
+          parseYearFromText(row["Selected - Election"]) ??
+          fallbackYear;
+
+        if (!method || year == null) continue;
+
+        const existing = votesByName.get(normalizedName) || [];
+        existing.push({ year, method });
+        votesByName.set(normalizedName, existing);
       }
     }
   }
-  return names;
+
+  for (const [name, records] of votesByName.entries()) {
+    votesByName.set(name, dedupePrimaryVoteRecords(records));
+  }
+
+  return { names, votesByName };
 }
 
 function parseName(raw: string): { firstName: string; lastName: string } {
@@ -106,7 +141,11 @@ export function parseHistoryCSV(csvText: string): Map<string, Election[]> {
   return map;
 }
 
-export function parseCSV(csvText: string, historyMap?: Map<string, Election[]>, repPrimaryNames?: Set<string>): { voters: Voter[]; geocodedVoters: GeocodedVoter[]; errors: string[] } {
+export function parseCSV(
+  csvText: string,
+  historyMap?: Map<string, Election[]>,
+  repPrimaryData?: RepPrimaryData
+): { voters: Voter[]; geocodedVoters: GeocodedVoter[]; errors: string[] } {
   const errors: string[] = [];
 
   const result = Papa.parse(csvText, {
@@ -195,12 +234,14 @@ export function parseCSV(csvText: string, historyMap?: Map<string, Election[]>, 
 
     // Determine primary party affiliation from rep primary cross-reference
     let primaryParty: "R" | "D" | null = null;
-    if (repPrimaryNames) {
+    let repPrimaryVotes: RepPrimaryVoteRecord[] = [];
+    if (repPrimaryData) {
       const fullName = hasCompositeName && columnMap.name
         ? (row[columnMap.name] || "").trim()
         : `${firstName} ${lastName}`.trim();
       const normalized = normalizeName(fullName);
-      if (repPrimaryNames.has(normalized)) {
+      repPrimaryVotes = repPrimaryData.votesByName.get(normalized) || [];
+      if (repPrimaryData.names.has(normalized)) {
         primaryParty = "R";
       } else if (elections.some((e) => /primary/i.test(e.type))) {
         primaryParty = "D";
@@ -222,6 +263,7 @@ export function parseCSV(csvText: string, historyMap?: Map<string, Election[]>, 
       elections,
       registrationStatus: columnMap.registrationStatus ? row[columnMap.registrationStatus]?.trim() || null : null,
       primaryParty,
+      repPrimaryVotes,
     };
 
     voters.push(voter);

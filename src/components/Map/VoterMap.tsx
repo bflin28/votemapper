@@ -20,6 +20,8 @@ import {
 import { PARTY_COLORS, planDayColor } from "@/lib/constants";
 import { totalRouteDistance } from "@/lib/distance-matrix";
 import { optimizeRouteOrder } from "@/lib/route-optimizer";
+import { matchesPrimaryMethodFilter } from "@/lib/primary-vote";
+import { buildGoogleMapsUrl } from "@/lib/plan-utils";
 
 function markerSize(memberCount: number): number {
   if (memberCount >= 3) return 18;
@@ -125,12 +127,24 @@ function HouseholdPopup({
   household,
   topElections,
   planAssignments,
+  travelMode,
 }: {
   household: Household;
   topElections: Election[];
   planAssignments: Record<string, number> | null;
+  travelMode: "walking" | "driving";
 }) {
   const hasElectionData = topElections.length > 0;
+  const mapsUrl = buildGoogleMapsUrl({
+    address: household.address,
+    city: household.city,
+    state: household.state,
+    zip: household.zip,
+    lat: household.lat,
+    lng: household.lng,
+    travelMode,
+    directions: true,
+  });
 
   return (
     <div className="text-xs min-w-[200px]">
@@ -138,6 +152,14 @@ function HouseholdPopup({
       <p className="text-zinc-500 mb-2">
         {household.city}, {household.state} {household.zip}
       </p>
+      <a
+        href={mapsUrl}
+        target="_blank"
+        rel="noreferrer"
+        className="mb-2 inline-flex rounded-md border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-medium text-indigo-700 transition-colors hover:bg-indigo-100"
+      >
+        Open in Google Maps
+      </a>
 
       {hasElectionData && (
         <div className="flex items-center gap-0 mb-1 pl-[calc(8px+6px)]">
@@ -228,6 +250,10 @@ export default function VoterMap() {
   const activePlanDay = finalizedPlan?.activeDay ?? "all";
   const finalizedTravelMode = finalizedPlan?.travelMode ?? "walking";
   const showPlanRouteOverlays = hasFinalizedPlan && activePlanDay !== "all";
+  const selectedPrimaryMethods = useMemo(
+    () => filters.primaryVotingMethods ?? [],
+    [filters.primaryVotingMethods]
+  );
   const campaignListIdSet = useMemo(
     () => new Set(campaignListIds),
     [campaignListIds]
@@ -269,6 +295,16 @@ export default function VoterMap() {
       }
     }
 
+    if (selectedPrimaryMethods.length > 0) {
+      voters = voters.filter((voter) =>
+        matchesPrimaryMethodFilter(
+          voter,
+          selectedPrimaryMethods,
+          filters.selectedElections
+        )
+      );
+    }
+
     if (hasFinalizedPlan && planAssignments) {
       voters = voters.filter((v) => {
         const day = planAssignments[v.id];
@@ -286,6 +322,7 @@ export default function VoterMap() {
     hasFinalizedPlan,
     planAssignments,
     activePlanDay,
+    selectedPrimaryMethods,
     campaignListIdSet,
   ]);
 
@@ -467,6 +504,7 @@ export default function VoterMap() {
               household={hh}
               topElections={topElections}
               planAssignments={planAssignments}
+              travelMode={finalizedTravelMode}
             />
           </Popup>
         </Marker>
