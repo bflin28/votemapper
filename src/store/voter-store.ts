@@ -10,13 +10,12 @@ export interface VoterFilters {
   primaryParty: "all" | "R" | "D" | "unknown";
 }
 
-export type ColorMode = "engagement" | "party";
-
 export interface FinalizedCampaignPlan {
   assignments: Record<string, number>;
   days: number;
   startDate: string;
   activeDay: "all" | number;
+  travelMode: "walking" | "driving";
 }
 
 const DEFAULT_FILTERS: VoterFilters = {
@@ -41,8 +40,16 @@ interface VoterStore {
   importErrors: string[];
   numWalkers: number;
   filters: VoterFilters;
-  colorMode: ColorMode;
+  selectedScrapes: string[];
   finalizedPlan: FinalizedCampaignPlan | null;
+
+  // Campaign plan wizard state
+  campaignDays: number;
+  doorsPerDay: number;
+  campaignStartDate: string;
+  campaignListIds: string[];
+  planBuilding: boolean;
+  hasHydrated: boolean;
 
   // Actions
   setVoters: (voters: Voter[], errors?: string[]) => void;
@@ -55,15 +62,27 @@ interface VoterStore {
   setSelectedWalkerId: (id: number | null) => void;
   setNumWalkers: (n: number) => void;
   setFilters: (filters: Partial<VoterFilters>) => void;
-  setColorMode: (mode: ColorMode) => void;
+  setSelectedScrapes: (scrapes: string[]) => void;
   setFinalizedPlan: (plan: {
     assignments: Record<string, number>;
     days: number;
     startDate: string;
+    travelMode?: "walking" | "driving";
   }) => void;
   setFinalizedPlanActiveDay: (day: "all" | number) => void;
   clearFinalizedPlan: () => void;
   clearFilters: () => void;
+  setCampaignDays: (days: number) => void;
+  setCampaignStartDate: (date: string) => void;
+  setDoorsPerDay: (doors: number) => void;
+  setCampaignListIds: (ids: string[]) => void;
+  addToCampaignList: (ids: string[]) => void;
+  removeFromCampaignList: (ids: string[]) => void;
+  clearCampaignList: () => void;
+  setPlanBuilding: (active: boolean) => void;
+  setHasHydrated: (hydrated: boolean) => void;
+  startPlanBuilding: (config: { days: number; startDate: string; doorsPerDay: number }) => void;
+  resetPlanBuilding: () => void;
   reset: () => void;
 }
 
@@ -79,8 +98,14 @@ const initialState = {
   importErrors: [],
   numWalkers: NUM_WALKERS,
   filters: { ...DEFAULT_FILTERS },
-  colorMode: "engagement" as ColorMode,
+  selectedScrapes: [] as string[],
   finalizedPlan: null as FinalizedCampaignPlan | null,
+  campaignDays: 3,
+  doorsPerDay: 20,
+  campaignStartDate: "",
+  campaignListIds: [] as string[],
+  planBuilding: false,
+  hasHydrated: false,
 };
 
 export const useVoterStore = create<VoterStore>()(
@@ -100,6 +125,11 @@ export const useVoterStore = create<VoterStore>()(
           routes: [],
           selectedWalkerId: null,
           finalizedPlan: null,
+          planBuilding: false,
+          campaignListIds: [],
+          campaignDays: 3,
+          campaignStartDate: "",
+          doorsPerDay: 20,
         }),
 
       setGeocodedVoters: (geocoded, unmatched) =>
@@ -133,7 +163,7 @@ export const useVoterStore = create<VoterStore>()(
       },
       setFilters: (partial) =>
         set((state) => ({ filters: { ...state.filters, ...partial } })),
-      setColorMode: (mode) => set({ colorMode: mode }),
+      setSelectedScrapes: (scrapes) => set({ selectedScrapes: scrapes }),
       setFinalizedPlan: (plan) =>
         set({
           finalizedPlan: {
@@ -141,6 +171,7 @@ export const useVoterStore = create<VoterStore>()(
             days: plan.days,
             startDate: plan.startDate,
             activeDay: "all",
+            travelMode: plan.travelMode ?? "walking",
           },
         }),
       setFinalizedPlanActiveDay: (day) =>
@@ -151,10 +182,66 @@ export const useVoterStore = create<VoterStore>()(
         ),
       clearFinalizedPlan: () => set({ finalizedPlan: null }),
       clearFilters: () => set({ filters: { ...DEFAULT_FILTERS } }),
-      reset: () => set(initialState),
+      setCampaignDays: (days) =>
+        set({
+          campaignDays: Math.max(1, Math.min(30, Math.round(days))),
+          finalizedPlan: null,
+        }),
+      setCampaignStartDate: (date) =>
+        set({ campaignStartDate: date, finalizedPlan: null }),
+      setDoorsPerDay: (doors) =>
+        set({ doorsPerDay: Math.max(1, Math.round(doors)) }),
+      setCampaignListIds: (ids) => set({ campaignListIds: ids }),
+      addToCampaignList: (ids) =>
+        set((state) => {
+          const existing = new Set(state.campaignListIds);
+          const next = [...state.campaignListIds];
+          for (const id of ids) {
+            if (!existing.has(id)) {
+              existing.add(id);
+              next.push(id);
+            }
+          }
+          return { campaignListIds: next, finalizedPlan: null };
+        }),
+      removeFromCampaignList: (ids) =>
+        set((state) => {
+          const toRemove = new Set(ids);
+          return {
+            campaignListIds: state.campaignListIds.filter((id) => !toRemove.has(id)),
+            finalizedPlan: null,
+          };
+        }),
+      clearCampaignList: () =>
+        set({ campaignListIds: [], finalizedPlan: null }),
+      setPlanBuilding: (active) => set({ planBuilding: active }),
+      setHasHydrated: (hydrated) => set({ hasHydrated: hydrated }),
+      startPlanBuilding: (config) =>
+        set({
+          campaignDays: Math.max(1, Math.min(30, Math.round(config.days))),
+          campaignStartDate: config.startDate,
+          doorsPerDay: Math.max(1, Math.round(config.doorsPerDay)),
+          planBuilding: true,
+          campaignListIds: [],
+          finalizedPlan: null,
+        }),
+      resetPlanBuilding: () =>
+        set({
+          campaignDays: 3,
+          doorsPerDay: 20,
+          campaignStartDate: "",
+          campaignListIds: [],
+          planBuilding: false,
+          finalizedPlan: null,
+        }),
+      reset: () => set({ ...initialState, hasHydrated: true }),
     }),
     {
       name: "vote-mapper-storage",
+      onRehydrateStorage: () => (state) => {
+        state?.resetPlanBuilding();
+        state?.setHasHydrated(true);
+      },
       partialize: (state) => ({
         voters: state.voters,
         geocodedVoters: state.geocodedVoters,
@@ -163,7 +250,13 @@ export const useVoterStore = create<VoterStore>()(
         stage: state.stage,
         importErrors: state.importErrors,
         numWalkers: state.numWalkers,
+        selectedScrapes: state.selectedScrapes,
         finalizedPlan: state.finalizedPlan,
+        campaignListIds: state.campaignListIds,
+        campaignDays: state.campaignDays,
+        campaignStartDate: state.campaignStartDate,
+        doorsPerDay: state.doorsPerDay,
+        planBuilding: state.planBuilding,
       }),
     }
   )

@@ -10,257 +10,66 @@ import {
   getTopElections,
   shortElectionLabel,
 } from "@/lib/scoring";
-import { clusterVoters } from "@/lib/clustering";
 import { haversineDistance } from "@/lib/distance-matrix";
-import { optimizeRouteOrder } from "@/lib/route-optimizer";
+import {
+  MAX_PLAN_DAYS,
+  PLAN_PREVIEW_LIMIT,
+  toDateInputValue,
+  parseDateInput,
+  addDays,
+  formatCampaignDate,
+  mergeUniqueIds,
+  csvValue,
+  orderVotersByWalkingPath,
+  buildBalancedGeoPlanAssignments,
+  buildDayPlans,
+} from "@/lib/plan-utils";
 
 type SortKey = "name" | "voteCount" | "lastVoted";
 type SortDir = "asc" | "desc";
 
-const MAX_PLAN_DAYS = 30;
-const PLAN_PREVIEW_LIMIT = 6;
+const GROSS_TARGET_MISMATCH_RATIO = 0.25;
+const GROSS_TARGET_MISMATCH_MIN_VOTERS = 25;
 
-interface DayPlan {
-  dayNumber: number;
-  dateValue: string;
-  dateLabel: string;
-  voters: Voter[];
+interface VoterTableProps {
+  planMode?: boolean;
 }
 
-function buildDayPlans(
-  voters: Voter[],
-  startDateValue: string,
-  days: number
-): DayPlan[] {
-  if (voters.length === 0 || days <= 0) return [];
-
-  const startDate = parseDateInput(startDateValue);
-  const baseSize = Math.floor(voters.length / days);
-  const extra = voters.length % days;
-
-  let cursor = 0;
-  const plans: DayPlan[] = [];
-
-  for (let i = 0; i < days; i++) {
-    const size = baseSize + (i < extra ? 1 : 0);
-    const votersForDay = voters.slice(cursor, cursor + size);
-    cursor += size;
-
-    const date = addDays(startDate, i);
-    plans.push({
-      dayNumber: i + 1,
-      dateValue: toDateInputValue(date),
-      dateLabel: formatCampaignDate(date),
-      voters: votersForDay,
-    });
-  }
-
-  return plans;
-}
-
-function toDateInputValue(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function parseDateInput(value: string): Date {
-  const parsed = new Date(`${value}T12:00:00`);
-  if (!isNaN(parsed.getTime())) return parsed;
-  const fallback = new Date();
-  fallback.setHours(12, 0, 0, 0);
-  return fallback;
-}
-
-function addDays(date: Date, days: number): Date {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function formatCampaignDate(date: Date): string {
-  return date.toLocaleDateString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function mergeUniqueIds(base: string[], additions: string[]): string[] {
-  const existing = new Set(base);
-  const next = [...base];
-  for (const id of additions) {
-    if (!existing.has(id)) {
-      existing.add(id);
-      next.push(id);
-    }
-  }
-  return next;
-}
-
-function csvValue(value: string | number | null | undefined): string {
-  if (value === null || value === undefined) return "";
-  const str = String(value);
-  if (/[",\n]/.test(str)) {
-    return `"${str.replace(/"/g, "\"\"")}"`;
-  }
-  return str;
-}
-
-function orderVotersByWalkingPath(
-  voters: Voter[],
-  geocodedById: Map<string, GeocodedVoter>
-): Voter[] {
-  if (voters.length <= 1) return voters;
-
-  const geocodedPairs = voters
-    .map((voter) => {
-      const geocoded = geocodedById.get(voter.id);
-      return geocoded ? { voter, geocoded } : null;
-    })
-    .filter((pair): pair is { voter: Voter; geocoded: GeocodedVoter } => Boolean(pair));
-
-  if (geocodedPairs.length <= 1) return voters;
-
-  const order = optimizeRouteOrder(geocodedPairs.map((pair) => pair.geocoded));
-  const orderedGeocoded = order.map((idx) => geocodedPairs[idx].voter);
-  const orderedSet = new Set(orderedGeocoded.map((voter) => voter.id));
-  const nonGeocoded = voters.filter((voter) => !orderedSet.has(voter.id));
-
-  return [...orderedGeocoded, ...nonGeocoded];
-}
-
-function buildBalancedGeoPlanAssignments(
-  campaignList: Voter[],
-  geocodedVoters: GeocodedVoter[],
-  days: number
-): Record<string, number> {
-  const safeDays = Math.max(1, Math.floor(days));
-  const assignments: Record<string, number> = {};
-  if (campaignList.length === 0) return assignments;
-
-  const geocodedById = new Map(geocodedVoters.map((voter) => [voter.id, voter]));
-  const geocodedList: GeocodedVoter[] = [];
-
-  for (const voter of campaignList) {
-    const geocoded = geocodedById.get(voter.id);
-    if (geocoded) {
-      geocodedList.push(geocoded);
-    }
-  }
-
-  const baseCapacity = Math.floor(campaignList.length / safeDays);
-  const extraCapacity = campaignList.length % safeDays;
-
-  const capacities = Array.from({ length: safeDays }, (_, idx) =>
-    baseCapacity + (idx < extraCapacity ? 1 : 0)
-  );
-
-  const dayStates = Array.from({ length: safeDays }, (_, idx) => ({
-    day: idx + 1,
-    capacity: capacities[idx],
-    assignedCount: 0,
-  }));
-
-  if (geocodedList.length > 0) {
-    const clusters = clusterVoters(geocodedList, safeDays);
-    const centroids = Array.from(clusters.values())
-      .map((members) => {
-        const lat =
-          members.reduce((sum, voter) => sum + voter.lat, 0) / Math.max(1, members.length);
-        const lng =
-          members.reduce((sum, voter) => sum + voter.lng, 0) / Math.max(1, members.length);
-        return { lat, lng };
-      })
-      .sort((a, b) => (a.lng !== b.lng ? a.lng - b.lng : a.lat - b.lat));
-
-    while (centroids.length < safeDays) {
-      const fallback = geocodedList[centroids.length % geocodedList.length];
-      centroids.push({ lat: fallback.lat, lng: fallback.lng });
-    }
-
-    const remainingCapacities = [...capacities];
-    const geocodedScores = geocodedList
-      .map((voter) => {
-        const distances = centroids.map((centroid) =>
-          haversineDistance(voter.lat, voter.lng, centroid.lat, centroid.lng)
-        );
-        const sorted = [...distances].sort((a, b) => a - b);
-        const spread = (sorted[1] ?? sorted[0] ?? 0) - (sorted[0] ?? 0);
-        return { voter, distances, spread };
-      })
-      .sort((a, b) => b.spread - a.spread);
-
-    for (const { voter, distances } of geocodedScores) {
-      let bestDayIdx = -1;
-      let bestDistance = Infinity;
-
-      for (let dayIdx = 0; dayIdx < safeDays; dayIdx++) {
-        if (remainingCapacities[dayIdx] <= 0) continue;
-        if (distances[dayIdx] < bestDistance) {
-          bestDistance = distances[dayIdx];
-          bestDayIdx = dayIdx;
-        }
-      }
-
-      if (bestDayIdx === -1) {
-        bestDayIdx = 0;
-      }
-
-      assignments[voter.id] = bestDayIdx + 1;
-      remainingCapacities[bestDayIdx] = Math.max(0, remainingCapacities[bestDayIdx] - 1);
-      dayStates[bestDayIdx].assignedCount += 1;
-    }
-  }
-
-  const unassigned = campaignList.filter((voter) => assignments[voter.id] == null);
-  for (const voter of unassigned) {
-    let bestDayIdx = 0;
-    for (let i = 1; i < dayStates.length; i++) {
-      const aRemaining = dayStates[i].capacity - dayStates[i].assignedCount;
-      const bRemaining =
-        dayStates[bestDayIdx].capacity - dayStates[bestDayIdx].assignedCount;
-      if (aRemaining > bRemaining) {
-        bestDayIdx = i;
-      }
-    }
-    assignments[voter.id] = bestDayIdx + 1;
-    dayStates[bestDayIdx].assignedCount += 1;
-  }
-
-  return assignments;
-}
-
-export default function VoterTable() {
+export default function VoterTable({ planMode = false }: VoterTableProps) {
   const voters = useVoterStore((s) => s.voters);
   const geocodedVoters = useVoterStore((s) => s.geocodedVoters);
   const filters = useVoterStore((s) => s.filters);
   const finalizedPlan = useVoterStore((s) => s.finalizedPlan);
   const setFinalizedPlan = useVoterStore((s) => s.setFinalizedPlan);
-  const clearFinalizedPlan = useVoterStore((s) => s.clearFinalizedPlan);
+  const campaignListIds = useVoterStore((s) => s.campaignListIds);
+  const campaignDays = useVoterStore((s) => s.campaignDays);
+  const campaignStartDate = useVoterStore((s) => s.campaignStartDate);
+  const doorsPerDay = useVoterStore((s) => s.doorsPerDay);
+  const setCampaignDays = useVoterStore((s) => s.setCampaignDays);
+  const setDoorsPerDay = useVoterStore((s) => s.setDoorsPerDay);
+  const setCampaignStartDate = useVoterStore((s) => s.setCampaignStartDate);
+  const addToCampaignList = useVoterStore((s) => s.addToCampaignList);
+  const removeFromCampaignList = useVoterStore((s) => s.removeFromCampaignList);
+  const clearCampaignList = useVoterStore((s) => s.clearCampaignList);
+
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [isPlanActive, setIsPlanActive] = useState(() => Boolean(finalizedPlan));
-  const [isPlanFinalized, setIsPlanFinalized] = useState(() => Boolean(finalizedPlan));
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [campaignListIds, setCampaignListIds] = useState<string[]>(
-    () => (finalizedPlan ? Object.keys(finalizedPlan.assignments) : [])
-  );
-  const [campaignDays, setCampaignDays] = useState(() => finalizedPlan?.days ?? 3);
-  const [campaignStartDate, setCampaignStartDate] = useState(() =>
-    finalizedPlan?.startDate ?? toDateInputValue(new Date())
-  );
+  const [showOnlyUnplanned, setShowOnlyUnplanned] = useState(false);
+  const [showTargetAdjustDialog, setShowTargetAdjustDialog] = useState(false);
+  const [showRouteModeDialog, setShowRouteModeDialog] = useState(false);
+  const [pendingFinalizeDays, setPendingFinalizeDays] = useState<number | null>(null);
+
+  const isPlanFinalized = Boolean(finalizedPlan);
+  const finalizedTravelMode = finalizedPlan?.travelMode ?? "walking";
 
   const topElections = useMemo(() => getTopElections(voters, 8), [voters]);
 
   const filtered = useMemo(() => {
     let result = voters;
 
-    // Apply store filters
     if (filters.registrationStatus.length > 0) {
       const statuses = new Set(filters.registrationStatus);
       result = result.filter((v) => v.registrationStatus && statuses.has(v.registrationStatus));
@@ -282,7 +91,6 @@ export default function VoterTable() {
       });
     }
 
-    // Apply text search
     if (search.trim()) {
       const q = search.toLowerCase();
       result = result.filter(
@@ -339,21 +147,6 @@ export default function VoterTable() {
     [validSelectedIds]
   );
 
-  const visibleIds = useMemo(() => sorted.map((voter) => voter.id), [sorted]);
-
-  const visibleIdSet = useMemo(
-    () => new Set(visibleIds),
-    [visibleIds]
-  );
-
-  const selectedVisibleCount = useMemo(
-    () => validSelectedIds.filter((id) => visibleIdSet.has(id)).length,
-    [validSelectedIds, visibleIdSet]
-  );
-
-  const allVisibleSelected =
-    visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
-
   const campaignList = useMemo(
     () =>
       campaignListIds
@@ -372,13 +165,58 @@ export default function VoterTable() {
     [validSelectedIds, campaignListIdSet]
   );
 
+  const selectedUnplannedIds = useMemo(
+    () => validSelectedIds.filter((id) => !campaignListIdSet.has(id)),
+    [validSelectedIds, campaignListIdSet]
+  );
+
+  const tableVoters = useMemo(() => {
+    if (!planMode || !showOnlyUnplanned) return sorted;
+    return sorted.filter((voter) => !campaignListIdSet.has(voter.id));
+  }, [sorted, planMode, showOnlyUnplanned, campaignListIdSet]);
+
+  const visibleIds = useMemo(
+    () => tableVoters.map((voter) => voter.id),
+    [tableVoters]
+  );
+
+  const visibleIdSet = useMemo(
+    () => new Set(visibleIds),
+    [visibleIds]
+  );
+
+  const visibleUnplannedIds = useMemo(
+    () => visibleIds.filter((id) => !campaignListIdSet.has(id)),
+    [visibleIds, campaignListIdSet]
+  );
+
+  const selectedVisibleCount = useMemo(
+    () => validSelectedIds.filter((id) => visibleIdSet.has(id)).length,
+    [validSelectedIds, visibleIdSet]
+  );
+
+  const allVisibleSelected =
+    visibleIds.length > 0 && selectedVisibleCount === visibleIds.length;
+
   const normalizedCampaignDays = Math.max(
     1,
     Math.min(MAX_PLAN_DAYS, Number.isFinite(campaignDays) ? campaignDays : 1)
   );
+  const normalizedDoorsPerDay = Math.max(
+    1,
+    Number.isFinite(doorsPerDay) ? Math.round(doorsPerDay) : 1
+  );
+  const currentTarget = normalizedCampaignDays * normalizedDoorsPerDay;
+  const targetMismatch = Math.abs(campaignList.length - currentTarget);
+  const targetMismatchRatio =
+    currentTarget > 0 ? targetMismatch / currentTarget : 0;
+  const isGrosslyOffTarget =
+    campaignList.length > 0 &&
+    targetMismatch >= GROSS_TARGET_MISMATCH_MIN_VOTERS &&
+    targetMismatchRatio >= GROSS_TARGET_MISMATCH_RATIO;
 
   const dayPlans = useMemo(() => {
-    if (!isPlanActive || !isPlanFinalized || campaignList.length === 0) return [];
+    if (!planMode || !isPlanFinalized || campaignList.length === 0) return [];
     const assignments = finalizedPlan?.assignments;
     if (!assignments) {
       return buildDayPlans(campaignList, campaignStartDate, normalizedCampaignDays);
@@ -405,7 +243,11 @@ export default function VoterTable() {
       const dayNumber = idx + 1;
       const date = addDays(startDate, idx);
       const unorderedVoters = byDay.get(dayNumber) || [];
-      const orderedVoters = orderVotersByWalkingPath(unorderedVoters, geocodedById);
+      const orderedVoters = orderVotersByWalkingPath(
+        unorderedVoters,
+        geocodedById,
+        finalizedTravelMode
+      );
       return {
         dayNumber,
         dateValue: toDateInputValue(date),
@@ -417,9 +259,10 @@ export default function VoterTable() {
     campaignList,
     campaignStartDate,
     normalizedCampaignDays,
-    isPlanActive,
+    planMode,
     isPlanFinalized,
     finalizedPlan,
+    finalizedTravelMode,
     geocodedById,
   ]);
 
@@ -457,55 +300,72 @@ export default function VoterTable() {
     });
   }
 
-  function addFilteredToCampaignList() {
-    setIsPlanFinalized(false);
-    clearFinalizedPlan();
-    setCampaignListIds((prev) => {
-      const cleaned = prev.filter((id) => voterById.has(id));
-      return mergeUniqueIds(cleaned, visibleIds);
-    });
+  function handleAddFiltered() {
+    if (visibleUnplannedIds.length === 0) return;
+    addToCampaignList(visibleUnplannedIds);
   }
 
-  function addSelectedToCampaignList() {
+  function handleAddSelected() {
+    if (selectedUnplannedIds.length === 0) return;
+    addToCampaignList(selectedUnplannedIds);
+  }
+
+  function handleRemoveSelected() {
     if (validSelectedIds.length === 0) return;
-    setIsPlanFinalized(false);
-    clearFinalizedPlan();
-    setCampaignListIds((prev) => {
-      const cleaned = prev.filter((id) => voterById.has(id));
-      return mergeUniqueIds(cleaned, validSelectedIds);
-    });
-  }
-
-  function removeSelectedFromCampaignList() {
-    if (validSelectedIds.length === 0) return;
-    setIsPlanFinalized(false);
-    clearFinalizedPlan();
-    setCampaignListIds((prev) => {
-      const selectedSet = new Set(validSelectedIds);
-      return prev.filter((id) => !selectedSet.has(id) && voterById.has(id));
-    });
-  }
-
-  function clearCampaignList() {
-    setIsPlanFinalized(false);
-    clearFinalizedPlan();
-    setCampaignListIds([]);
+    removeFromCampaignList(validSelectedIds);
   }
 
   function finalizePlan() {
     if (campaignList.length === 0) return;
+    if (isGrosslyOffTarget) {
+      setShowTargetAdjustDialog(true);
+      return;
+    }
+    openRouteModeDialog(normalizedCampaignDays);
+  }
+
+  function openRouteModeDialog(days: number) {
+    setPendingFinalizeDays(days);
+    setShowRouteModeDialog(true);
+  }
+
+  function finalizePlanWith(days: number, travelMode: "walking" | "driving") {
     const assignments = buildBalancedGeoPlanAssignments(
       campaignList,
       geocodedVoters,
-      normalizedCampaignDays
+      days
     );
 
     setFinalizedPlan({
       assignments,
-      days: normalizedCampaignDays,
+      days,
       startDate: campaignStartDate,
+      travelMode,
     });
-    setIsPlanFinalized(true);
+  }
+
+  function finalizeWithAdjustedTarget(nextDays: number, nextDoorsPerDay: number) {
+    setCampaignDays(nextDays);
+    setDoorsPerDay(nextDoorsPerDay);
+    setShowTargetAdjustDialog(false);
+    openRouteModeDialog(nextDays);
+  }
+
+  function finalizeWithCurrentTarget() {
+    setShowTargetAdjustDialog(false);
+    openRouteModeDialog(normalizedCampaignDays);
+  }
+
+  function handleRouteModeSelect(mode: "walking" | "driving") {
+    const daysToUse = pendingFinalizeDays ?? normalizedCampaignDays;
+    setShowRouteModeDialog(false);
+    setPendingFinalizeDays(null);
+    finalizePlanWith(daysToUse, mode);
+  }
+
+  function handleRouteModeCancel() {
+    setShowRouteModeDialog(false);
+    setPendingFinalizeDays(null);
   }
 
   function exportCampaignPlanCSV() {
@@ -620,9 +480,9 @@ export default function VoterTable() {
               className="w-72 rounded-md border border-zinc-200 px-2.5 py-1.5 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
             />
             <span className="text-xs text-zinc-400">
-              {filtered.length} of {voters.length} voters
+              {tableVoters.length} of {voters.length} voters
             </span>
-            {isPlanActive ? (
+            {planMode && (
               <>
                 <span className="text-xs text-zinc-400">
                   {selectedVisibleCount} selected in view
@@ -630,43 +490,45 @@ export default function VoterTable() {
                 <span className="text-xs font-medium text-indigo-600">
                   Campaign list: {campaignList.length}
                 </span>
+                <span className="text-xs text-zinc-400">
+                  Target: ~{campaignDays * doorsPerDay} voters
+                </span>
               </>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  setIsPlanActive(true);
-                  setIsPlanFinalized(false);
-                  clearFinalizedPlan();
-                }}
-                className="rounded-md bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-indigo-700"
-              >
-                Create Plan
-              </button>
             )}
           </div>
 
-          {isPlanActive && (
+          {planMode && (
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={addFilteredToCampaignList}
-                disabled={visibleIds.length === 0}
-                className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+                onClick={() => setShowOnlyUnplanned((prev) => !prev)}
+                className={`rounded-md border px-2.5 py-1 text-xs font-medium transition-colors ${
+                  showOnlyUnplanned
+                    ? "border-indigo-300 bg-indigo-50 text-indigo-700"
+                    : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50"
+                }`}
               >
-                Add Filtered ({visibleIds.length})
+                {showOnlyUnplanned ? "Showing Unplanned" : "Only Unplanned"}
               </button>
               <button
                 type="button"
-                onClick={addSelectedToCampaignList}
-                disabled={validSelectedIds.length === 0}
+                onClick={handleAddFiltered}
+                disabled={visibleUnplannedIds.length === 0}
                 className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
               >
-                Add Selected ({validSelectedIds.length})
+                Add Filtered ({visibleUnplannedIds.length})
               </button>
               <button
                 type="button"
-                onClick={removeSelectedFromCampaignList}
+                onClick={handleAddSelected}
+                disabled={selectedUnplannedIds.length === 0}
+                className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Add Selected ({selectedUnplannedIds.length})
+              </button>
+              <button
+                type="button"
+                onClick={handleRemoveSelected}
                 disabled={selectedInListCount === 0}
                 className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -704,13 +566,11 @@ export default function VoterTable() {
                 value={normalizedCampaignDays}
                 onChange={(e) => {
                   const parsed = Number(e.target.value);
-                  setIsPlanFinalized(false);
-                  clearFinalizedPlan();
                   if (!Number.isFinite(parsed)) {
                     setCampaignDays(1);
                     return;
                   }
-                  setCampaignDays(Math.max(1, Math.min(MAX_PLAN_DAYS, Math.round(parsed))));
+                  setCampaignDays(parsed);
                 }}
                 className="w-16 rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-700 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
               />
@@ -719,11 +579,7 @@ export default function VoterTable() {
               <input
                 type="date"
                 value={campaignStartDate}
-                onChange={(e) => {
-                  setIsPlanFinalized(false);
-                  clearFinalizedPlan();
-                  setCampaignStartDate(e.target.value);
-                }}
+                onChange={(e) => setCampaignStartDate(e.target.value)}
                 className="rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-700 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
               />
             </div>
@@ -735,7 +591,7 @@ export default function VoterTable() {
           <table className="w-full text-xs">
             <thead className="sticky top-0 z-10 bg-zinc-50 text-left">
               <tr className="border-b border-zinc-200">
-                {isPlanActive && (
+                {planMode && (
                   <th className="w-8 px-2 py-2">
                     <input
                       type="checkbox"
@@ -773,14 +629,14 @@ export default function VoterTable() {
               </tr>
             </thead>
             <tbody>
-              {sorted.map((voter) => (
+              {tableVoters.map((voter) => (
                 <VoterRow
                   key={voter.id}
                   voter={voter}
                   topElections={topElections}
                   selected={selectedIdSet.has(voter.id)}
                   inCampaignList={campaignListIdSet.has(voter.id)}
-                  planningEnabled={isPlanActive}
+                  planningEnabled={planMode}
                   expanded={expandedId === voter.id}
                   onToggleSelection={() => toggleRowSelection(voter.id)}
                   onToggle={() =>
@@ -795,7 +651,7 @@ export default function VoterTable() {
         </div>
       </div>
 
-      {isPlanActive && (
+      {planMode && (
         <aside className="w-80 shrink-0 border-l border-zinc-200 bg-zinc-50/40">
           <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-2">
             <div>
@@ -868,6 +724,181 @@ export default function VoterTable() {
           </div>
         </aside>
       )}
+
+      {planMode && showTargetAdjustDialog && (
+        <TargetAdjustDialog
+          campaignListCount={campaignList.length}
+          currentTarget={currentTarget}
+          initialDays={normalizedCampaignDays}
+          initialDoorsPerDay={normalizedDoorsPerDay}
+          onCancel={() => setShowTargetAdjustDialog(false)}
+          onKeepCurrent={finalizeWithCurrentTarget}
+          onAdjustAndFinalize={finalizeWithAdjustedTarget}
+        />
+      )}
+
+      {planMode && showRouteModeDialog && (
+        <RouteModeDialog
+          onCancel={handleRouteModeCancel}
+          onSelectWalking={() => handleRouteModeSelect("walking")}
+          onSelectDriving={() => handleRouteModeSelect("driving")}
+        />
+      )}
+    </div>
+  );
+}
+
+function TargetAdjustDialog({
+  campaignListCount,
+  currentTarget,
+  initialDays,
+  initialDoorsPerDay,
+  onCancel,
+  onKeepCurrent,
+  onAdjustAndFinalize,
+}: {
+  campaignListCount: number;
+  currentTarget: number;
+  initialDays: number;
+  initialDoorsPerDay: number;
+  onCancel: () => void;
+  onKeepCurrent: () => void;
+  onAdjustAndFinalize: (days: number, doorsPerDay: number) => void;
+}) {
+  const [daysInput, setDaysInput] = useState(String(initialDays));
+  const [doorsPerDayInput, setDoorsPerDayInput] = useState(String(initialDoorsPerDay));
+
+  const parsedDays = Number(daysInput);
+  const parsedDoorsPerDay = Number(doorsPerDayInput);
+  const normalizedDays = Number.isFinite(parsedDays)
+    ? Math.max(1, Math.min(MAX_PLAN_DAYS, Math.round(parsedDays)))
+    : initialDays;
+  const normalizedDoorsPerDay = Number.isFinite(parsedDoorsPerDay)
+    ? Math.max(1, Math.round(parsedDoorsPerDay))
+    : initialDoorsPerDay;
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-900/35 p-4">
+      <div className="w-full max-w-md rounded-lg border border-zinc-200 bg-white p-5 shadow-xl">
+        <h3 className="text-sm font-semibold text-zinc-900">
+          Campaign Target Is Off
+        </h3>
+        <p className="mt-1 text-xs text-zinc-600">
+          You selected {campaignListCount} planned voters, but your current target is{" "}
+          {currentTarget} ({initialDays} days × {initialDoorsPerDay}/day).
+        </p>
+        <p className="mt-1 text-xs text-zinc-600">
+          Do you want to adjust days or doors per day before finalizing?
+        </p>
+
+        <div className="mt-4 grid grid-cols-2 gap-3">
+          <label className="flex flex-col gap-1 text-xs text-zinc-600">
+            Days
+            <input
+              type="number"
+              min={1}
+              max={MAX_PLAN_DAYS}
+              value={daysInput}
+              onChange={(e) => setDaysInput(e.target.value)}
+              className="rounded-md border border-zinc-200 px-2 py-1.5 text-xs text-zinc-700 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-zinc-600">
+            Doors / day
+            <input
+              type="number"
+              min={1}
+              value={doorsPerDayInput}
+              onChange={(e) => setDoorsPerDayInput(e.target.value)}
+              className="rounded-md border border-zinc-200 px-2 py-1.5 text-xs text-zinc-700 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+            />
+          </label>
+        </div>
+
+        <p className="mt-3 rounded-md bg-indigo-50 px-3 py-2 text-xs font-medium text-indigo-700">
+          New target: ~{normalizedDays * normalizedDoorsPerDay} voters
+        </p>
+
+        <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onKeepCurrent}
+            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50"
+          >
+            Keep Current
+          </button>
+          <button
+            type="button"
+            onClick={() => onAdjustAndFinalize(normalizedDays, normalizedDoorsPerDay)}
+            className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-indigo-700"
+          >
+            Adjust & Finalize
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RouteModeDialog({
+  onCancel,
+  onSelectWalking,
+  onSelectDriving,
+}: {
+  onCancel: () => void;
+  onSelectWalking: () => void;
+  onSelectDriving: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-zinc-900/35 p-4">
+      <div className="w-full max-w-md rounded-lg border border-zinc-200 bg-white p-5 shadow-xl">
+        <h3 className="text-sm font-semibold text-zinc-900">
+          Finalize Route Mode
+        </h3>
+        <p className="mt-1 text-xs text-zinc-600">
+          Choose how route ordering should be optimized for this plan.
+        </p>
+
+        <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={onSelectWalking}
+            className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-left text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50"
+          >
+            Walking
+            <span className="mt-1 block text-[11px] font-normal text-zinc-500">
+              Keep current straight-distance routing.
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={onSelectDriving}
+            className="rounded-md border border-zinc-200 bg-white px-3 py-2 text-left text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50"
+          >
+            Driving
+            <span className="mt-1 block text-[11px] font-normal text-zinc-500">
+              Add light penalty for left turns.
+            </span>
+          </button>
+        </div>
+
+        <div className="mt-4 flex justify-end">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -946,10 +977,10 @@ function VoterRow({
         </td>
 
         {/* Party */}
-        <td className="px-3 py-2 text-zinc-500">{voter.party || "—"}</td>
+        <td className="px-3 py-2 text-zinc-500">{voter.party === "R" ? "Rep" : voter.party === "D" ? "Dem/Other" : voter.party || "\u2014"}</td>
 
         {/* Age */}
-        <td className="px-3 py-2 text-zinc-500">{voter.age || "—"}</td>
+        <td className="px-3 py-2 text-zinc-500">{voter.age || "\u2014"}</td>
 
         {/* Registration status */}
         <td className="px-3 py-2">
@@ -964,7 +995,7 @@ function VoterRow({
               {voter.registrationStatus}
             </span>
           ) : (
-            "—"
+            "\u2014"
           )}
         </td>
 
@@ -978,7 +1009,7 @@ function VoterRow({
                 month: "short",
                 year: "numeric",
               })
-            : "—"}
+            : "\u2014"}
         </td>
 
         {/* Chevron */}
@@ -1089,7 +1120,7 @@ function ElectionDetail({
           Full address: {voter.address}, {voter.city}, {voter.state}{" "}
           {voter.zip}
         </span>
-        {voter.party && <span>Party: {voter.party}</span>}
+        {voter.party && <span>Party: {voter.party === "R" ? "Rep" : voter.party === "D" ? "Dem/Other" : voter.party}</span>}
         {voter.age && <span>Age: {voter.age}</span>}
       </div>
     </div>

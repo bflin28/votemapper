@@ -16,7 +16,6 @@ import {
   voterScore,
   engagementTier,
   ENGAGEMENT_COLORS,
-  isHighValueHousehold,
 } from "@/lib/scoring";
 import { PARTY_COLORS, planDayColor } from "@/lib/constants";
 import { totalRouteDistance } from "@/lib/distance-matrix";
@@ -73,6 +72,41 @@ function createHouseholdIcon(size: number, color: string, borderColor: string, h
     iconAnchor: [effectiveSize / 2, effectiveSize / 2],
     popupAnchor: [0, -effectiveSize / 2 - 2],
   });
+}
+
+function createPlanEndpointIcon(color: string, label: "S" | "F"): L.DivIcon {
+  const bg = label === "S" ? "#059669" : "#dc2626";
+  const border = color || "#18181b";
+
+  return L.divIcon({
+    className: "plan-endpoint-marker",
+    html: `<div style="
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: ${bg};
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      border: 2px solid ${border};
+      box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+    ">${label}</div>`,
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
+    popupAnchor: [0, -10],
+  });
+}
+
+function offsetFinishPosition(
+  start: [number, number],
+  finish: [number, number]
+): [number, number] {
+  if (start[0] !== finish[0] || start[1] !== finish[1]) return finish;
+  // Nudge finish marker a few meters east so both endpoints are visible.
+  return [finish[0], finish[1] + 0.00008];
 }
 
 function FitBounds({ positions }: { positions: [number, number][] }) {
@@ -174,40 +208,65 @@ function HouseholdPopup({
 }
 
 export default function VoterMap() {
-  const { geocodedVoters, routes, selectedWalkerId, filters, colorMode, finalizedPlan } = useVoterStore();
+  const {
+    geocodedVoters,
+    routes,
+    selectedWalkerId,
+    filters,
+    finalizedPlan,
+    planBuilding,
+    campaignListIds,
+  } = useVoterStore();
 
   const hasFinalizedPlan = Boolean(
     finalizedPlan && Object.keys(finalizedPlan.assignments).length > 0
   );
+  const hasPlanBuildingList = planBuilding && campaignListIds.length > 0;
+  const hasActivePlan = hasFinalizedPlan || hasPlanBuildingList;
 
   const planAssignments = finalizedPlan?.assignments ?? null;
   const activePlanDay = finalizedPlan?.activeDay ?? "all";
+  const finalizedTravelMode = finalizedPlan?.travelMode ?? "walking";
+  const showPlanRouteOverlays = hasFinalizedPlan && activePlanDay !== "all";
+  const campaignListIdSet = useMemo(
+    () => new Set(campaignListIds),
+    [campaignListIds]
+  );
 
   const filteredVoters = useMemo(() => {
     let voters = geocodedVoters;
 
-    if (filters.registrationStatus.length > 0) {
-      const statuses = new Set(filters.registrationStatus);
-      voters = voters.filter((v) => v.registrationStatus && statuses.has(v.registrationStatus));
-    }
-
-    if (filters.selectedElections.length > 0) {
-      voters = voters.filter((v) =>
-        filters.selectedElections.every((date) =>
-          v.elections.some((e) => e.date === date)
-        )
-      );
-    }
-
-    if (filters.engagementTier !== "all") {
-      voters = voters.filter((v) => engagementTier(voterScore(v)) === filters.engagementTier);
-    }
-
-    if (filters.primaryParty !== "all") {
+    if (hasActivePlan) {
       voters = voters.filter((v) => {
-        if (filters.primaryParty === "unknown") return !v.primaryParty;
-        return v.primaryParty === filters.primaryParty;
+        if (hasFinalizedPlan && planAssignments) {
+          return planAssignments[v.id] != null;
+        }
+        return campaignListIdSet.has(v.id);
       });
+    } else {
+      if (filters.registrationStatus.length > 0) {
+        const statuses = new Set(filters.registrationStatus);
+        voters = voters.filter((v) => v.registrationStatus && statuses.has(v.registrationStatus));
+      }
+
+      if (filters.selectedElections.length > 0) {
+        voters = voters.filter((v) =>
+          filters.selectedElections.every((date) =>
+            v.elections.some((e) => e.date === date)
+          )
+        );
+      }
+
+      if (filters.engagementTier !== "all") {
+        voters = voters.filter((v) => engagementTier(voterScore(v)) === filters.engagementTier);
+      }
+
+      if (filters.primaryParty !== "all") {
+        voters = voters.filter((v) => {
+          if (filters.primaryParty === "unknown") return !v.primaryParty;
+          return v.primaryParty === filters.primaryParty;
+        });
+      }
     }
 
     if (hasFinalizedPlan && planAssignments) {
@@ -220,7 +279,15 @@ export default function VoterMap() {
     }
 
     return voters;
-  }, [geocodedVoters, filters, hasFinalizedPlan, planAssignments, activePlanDay]);
+  }, [
+    geocodedVoters,
+    filters,
+    hasActivePlan,
+    hasFinalizedPlan,
+    planAssignments,
+    activePlanDay,
+    campaignListIdSet,
+  ]);
 
   const households = useMemo(
     () => groupHouseholds(filteredVoters),
@@ -232,7 +299,7 @@ export default function VoterMap() {
     [geocodedVoters]
   );
 
-  const isOptimized = routes.length > 0 && !hasFinalizedPlan;
+  const isOptimized = routes.length > 0 && !hasActivePlan;
 
   const voterColorMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -245,12 +312,12 @@ export default function VoterMap() {
   }, [routes]);
 
   const selectedVoterIds = useMemo(() => {
-    if (hasFinalizedPlan) return null;
+    if (hasActivePlan) return null;
     if (selectedWalkerId === null) return null;
     const route = routes.find((r) => r.walkerId === selectedWalkerId);
     if (!route) return null;
     return new Set(route.voters.map((v) => v.id));
-  }, [routes, selectedWalkerId, hasFinalizedPlan]);
+  }, [routes, selectedWalkerId, hasActivePlan]);
 
   const visibleHouseholds = useMemo(() => {
     if (!selectedVoterIds) return households;
@@ -269,8 +336,7 @@ export default function VoterMap() {
   );
 
   const planDayRoutes = useMemo(() => {
-    if (!hasFinalizedPlan || !planAssignments) return [];
-    if (activePlanDay === "all") return [];
+    if (!showPlanRouteOverlays || !planAssignments) return [];
 
     const dayGroups = new Map<number, typeof filteredVoters>();
     for (const voter of filteredVoters) {
@@ -287,11 +353,9 @@ export default function VoterMap() {
     const routes = Array.from(dayGroups.entries())
       .sort(([a], [b]) => a - b)
       .map(([day, dayVoters]) => {
-        if (dayVoters.length < 2) {
-          return null;
-        }
+        if (dayVoters.length === 0) return null;
 
-        const order = optimizeRouteOrder(dayVoters);
+        const order = optimizeRouteOrder(dayVoters, { mode: finalizedTravelMode });
         const orderedVoters = order.map((idx) => dayVoters[idx]);
         const positions = orderedVoters.map((voter) => [voter.lat, voter.lng] as [number, number]);
         const distanceKm = totalRouteDistance(dayVoters, order);
@@ -313,7 +377,12 @@ export default function VoterMap() {
       } => Boolean(route));
 
     return routes;
-  }, [hasFinalizedPlan, planAssignments, activePlanDay, filteredVoters]);
+  }, [
+    showPlanRouteOverlays,
+    planAssignments,
+    filteredVoters,
+    finalizedTravelMode,
+  ]);
 
   function getHouseholdIcon(hh: Household): L.DivIcon {
     const size = markerSize(hh.memberCount);
@@ -356,29 +425,21 @@ export default function VoterMap() {
       return createHouseholdIcon(size, majorityColor, "white");
     }
 
-    if (colorMode === "party") {
-      // Party-based color: majority party of household members
-      const partyCounts: Record<string, number> = { R: 0, D: 0, unknown: 0 };
-      for (const member of hh.members) {
-        const key = member.primaryParty || "unknown";
-        partyCounts[key] = (partyCounts[key] || 0) + 1;
-      }
-      let majorityParty = "unknown";
-      let maxCount = 0;
-      for (const [p, count] of Object.entries(partyCounts)) {
-        if (count > maxCount) {
-          majorityParty = p;
-          maxCount = count;
-        }
-      }
-      return createHouseholdIcon(size, PARTY_COLORS[majorityParty], "white");
+    // Pre-optimization: party-based color (majority party of household members)
+    const partyCounts: Record<string, number> = { R: 0, D: 0, unknown: 0 };
+    for (const member of hh.members) {
+      const key = member.primaryParty || "unknown";
+      partyCounts[key] = (partyCounts[key] || 0) + 1;
     }
-
-    // Pre-optimization: engagement-based color
-    const tier = engagementTier(hh.score);
-    const color = ENGAGEMENT_COLORS[tier];
-    const highValue = isHighValueHousehold(hh);
-    return createHouseholdIcon(size, color, "white", highValue);
+    let majorityParty = "unknown";
+    let maxCount = 0;
+    for (const [p, count] of Object.entries(partyCounts)) {
+      if (count > maxCount) {
+        majorityParty = p;
+        maxCount = count;
+      }
+    }
+    return createHouseholdIcon(size, PARTY_COLORS[majorityParty], "white");
   }
 
   return (
@@ -426,6 +487,36 @@ export default function VoterMap() {
           </Tooltip>
         </Polyline>
       ))}
+
+      {planDayRoutes.flatMap((route) => {
+        const start = route.positions[0];
+        const rawFinish = route.positions[route.positions.length - 1];
+        const finish = rawFinish ? offsetFinishPosition(start, rawFinish) : null;
+        if (!start || !finish) return [];
+
+        return [
+          <Marker
+            key={`plan-day-${route.day}-start`}
+            position={start}
+            icon={createPlanEndpointIcon(route.color, "S")}
+            zIndexOffset={1500}
+          >
+            <Tooltip direction="top" offset={[0, -8]} opacity={0.95}>
+              Day {route.day} Start
+            </Tooltip>
+          </Marker>,
+          <Marker
+            key={`plan-day-${route.day}-finish`}
+            position={finish}
+            icon={createPlanEndpointIcon(route.color, "F")}
+            zIndexOffset={1500}
+          >
+            <Tooltip direction="top" offset={[0, -8]} opacity={0.95}>
+              Day {route.day} Finish
+            </Tooltip>
+          </Marker>,
+        ];
+      })}
 
       {!hasFinalizedPlan && <RouteLayer />}
       <MapLegend />

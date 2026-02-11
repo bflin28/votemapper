@@ -1,64 +1,13 @@
 "use client";
 
 import { useVoterStore } from "@/store/voter-store";
-import { ENGAGEMENT_COLORS, EngagementTier } from "@/lib/scoring";
 import { PARTY_COLORS, planDayColor } from "@/lib/constants";
-
-const TIER_LABELS: { tier: EngagementTier; label: string }[] = [
-  { tier: "high", label: "High" },
-  { tier: "medium", label: "Medium" },
-  { tier: "low", label: "Low" },
-  { tier: "none", label: "No history" },
-];
 
 const SIZE_LABELS = [
   { count: 1, size: 10 },
   { count: 2, size: 14 },
   { count: "3+", size: 18 },
 ];
-
-function EngagementLegend() {
-  return (
-    <div className="leaflet-bottom leaflet-right" style={{ pointerEvents: "auto" }}>
-      <div className="leaflet-control m-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-md">
-        <h3 className="text-xs font-semibold text-zinc-700 mb-2">Engagement</h3>
-
-        <div className="flex flex-col gap-1 mb-3">
-          {TIER_LABELS.map(({ tier, label }) => (
-            <div key={tier} className="flex items-center gap-2 text-xs">
-              <span
-                className="inline-block h-2.5 w-2.5 rounded-full"
-                style={{ backgroundColor: ENGAGEMENT_COLORS[tier] }}
-              />
-              <span className="text-zinc-600">{label}</span>
-            </div>
-          ))}
-        </div>
-
-        <h3 className="text-xs font-semibold text-zinc-700 mb-2">Household size</h3>
-        <div className="flex items-end gap-3 mb-3">
-          {SIZE_LABELS.map(({ count, size }) => (
-            <div key={String(count)} className="flex flex-col items-center gap-1">
-              <span
-                className="inline-block rounded-full bg-zinc-400"
-                style={{ width: size, height: size }}
-              />
-              <span className="text-[10px] text-zinc-500">{count}</span>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-2 text-xs">
-          <span
-            className="inline-block h-3 w-3 rounded-full bg-emerald-500"
-            style={{ border: "2px solid #f59e0b" }}
-          />
-          <span className="text-zinc-600">High-value household</span>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 const PARTY_LABELS: { key: string; label: string }[] = [
   { key: "R", label: "Republican" },
@@ -197,16 +146,35 @@ function PlanLegend() {
   );
 }
 
+function PlanBuildingLegend() {
+  const campaignListIds = useVoterStore((s) => s.campaignListIds);
+
+  return (
+    <div className="leaflet-bottom leaflet-right" style={{ pointerEvents: "auto" }}>
+      <div className="leaflet-control m-2 rounded-lg border border-zinc-200 bg-white p-3 shadow-md">
+        <h3 className="text-xs font-semibold text-zinc-700">Campaign Plan</h3>
+        <p className="mt-1 text-xs text-zinc-500">
+          {campaignListIds.length} planned voter{campaignListIds.length === 1 ? "" : "s"}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function MapLegend() {
-  const { routes, geocodedVoters, colorMode, finalizedPlan } = useVoterStore();
+  const { routes, geocodedVoters, finalizedPlan, planBuilding, campaignListIds } = useVoterStore();
 
   if (finalizedPlan && Object.keys(finalizedPlan.assignments).length > 0) {
     return <PlanLegend />;
   }
 
+  if (planBuilding && campaignListIds.length > 0) {
+    return <PlanBuildingLegend />;
+  }
+
   if (routes.length > 0) return <WalkerLegend />;
   if (geocodedVoters.length > 0) {
-    return colorMode === "party" ? <PartyLegend /> : <EngagementLegend />;
+    return <PartyLegend />;
   }
   return null;
 }

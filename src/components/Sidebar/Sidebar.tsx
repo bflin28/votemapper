@@ -1,11 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useVoterStore } from "@/store/voter-store";
 import { getTopElections, shortElectionLabel } from "@/lib/scoring";
-import DataImport from "./DataImport";
-
-type Tab = "import" | "filters";
 
 function SegmentedControl<T extends string>({
   options,
@@ -136,7 +133,6 @@ function ElectionFilter({
 }
 
 export default function Sidebar() {
-  const [activeTab, setActiveTab] = useState<Tab>("import");
   const {
     voters,
     geocodedVoters,
@@ -146,9 +142,7 @@ export default function Sidebar() {
     error,
     importErrors,
     filters,
-    colorMode,
     setFilters,
-    setColorMode,
     clearFilters,
     reset,
   } = useVoterStore();
@@ -193,11 +187,6 @@ export default function Sidebar() {
     URL.revokeObjectURL(url);
   }
 
-  const tabs: { id: Tab; label: string; badge?: number }[] = [
-    { id: "import", label: "Import" },
-    { id: "filters", label: "Filters", badge: activeFilterCount },
-  ];
-
   return (
     <div className="flex h-full w-80 flex-col border-r border-zinc-200 bg-white">
       {/* Header */}
@@ -206,28 +195,6 @@ export default function Sidebar() {
         <p className="text-xs text-zinc-400">
           Optimal door-knocking routes
         </p>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex border-b border-zinc-200">
-        {tabs.map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            className={`relative flex-1 py-2 text-xs font-medium transition-colors ${
-              activeTab === tab.id
-                ? "border-b-2 border-indigo-600 text-indigo-600"
-                : "text-zinc-400 hover:text-zinc-600"
-            }`}
-          >
-            {tab.label}
-            {tab.badge != null && tab.badge > 0 && (
-              <span className="ml-1 inline-flex h-4 w-4 items-center justify-center rounded-full bg-indigo-600 text-[9px] font-bold text-white">
-                {tab.badge}
-              </span>
-            )}
-          </button>
-        ))}
       </div>
 
       {/* Content */}
@@ -246,120 +213,104 @@ export default function Sidebar() {
           </div>
         )}
 
-        {activeTab === "import" && (
-          <div className="flex flex-col gap-4">
-            <DataImport />
-
-            {/* Pipeline buttons */}
-            {voters.length > 0 && (
-              <div className="flex flex-col gap-2 border-t border-zinc-100 pt-3">
-                <p className="text-xs text-zinc-500">
-                  {voters.length} voters imported
-                  {importErrors.length > 0 && (
-                    <span className="text-amber-500">
-                      {" "}({importErrors.length} warnings)
-                    </span>
-                  )}
-                </p>
-
-                {geocodedVoters.length > 0 && (
-                  <p className="text-xs text-zinc-400">
-                    Geocoded: {geocodedVoters.length}/{voters.length} ({((geocodedVoters.length / voters.length) * 100).toFixed(0)}%)
-                    {unmatchedVoters.length > 0 && (
-                      <span className="text-amber-500"> &middot; {unmatchedVoters.length} unmatched</span>
-                    )}
-                  </p>
+        {voters.length > 0 ? (
+          <div className="mb-4 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2">
+            <p className="text-xs text-zinc-600">
+              {voters.length} voters loaded
+              {importErrors.length > 0 && (
+                <span className="text-amber-500">
+                  {" "}({importErrors.length} warnings)
+                </span>
+              )}
+            </p>
+            {geocodedVoters.length > 0 && (
+              <p className="mt-1 text-[11px] text-zinc-500">
+                Geocoded: {geocodedVoters.length}/{voters.length} ({((geocodedVoters.length / voters.length) * 100).toFixed(0)}%)
+                {unmatchedVoters.length > 0 && (
+                  <span className="text-amber-500"> &middot; {unmatchedVoters.length} unmatched</span>
                 )}
-
-                {routes.length > 0 && (
-                  <p className="text-xs text-zinc-400">
-                    {routes.length} routes &middot; {routes.reduce((s, r) => s + r.doorCount, 0)} doors &middot; {routes.reduce((s, r) => s + r.totalDistanceKm, 0).toFixed(1)} km
-                  </p>
-                )}
-
-              </div>
+              </p>
             )}
+          </div>
+        ) : (
+          <div className="mb-4 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs text-zinc-500">
+            Select campaign data in the Plan tab to load voters.
           </div>
         )}
 
-        {activeTab === "filters" && (
-          <div className="flex flex-col gap-4 text-xs">
-            {geocodedVoters.length === 0 ? (
-              <p className="text-zinc-400">Import and geocode voters to enable filters.</p>
-            ) : (
-              <>
-                <div>
-                  <label className="mb-1.5 block font-semibold text-zinc-700">
-                    Map Colors
-                  </label>
-                  <SegmentedControl
-                    options={[
-                      { label: "Engagement", value: "engagement" as const },
-                      { label: "Party", value: "party" as const },
-                    ]}
-                    value={colorMode}
-                    onChange={(v) => setColorMode(v)}
-                  />
-                </div>
-
-                <div>
-                  <label className="mb-1.5 block font-semibold text-zinc-700">
-                    Party
-                  </label>
-                  <SegmentedControl
-                    options={[
-                      { label: "All", value: "all" as const },
-                      { label: "R", value: "R" as const },
-                      { label: "D", value: "D" as const },
-                      { label: "Unknown", value: "unknown" as const },
-                    ]}
-                    value={filters.primaryParty}
-                    onChange={(v) => setFilters({ primaryParty: v })}
-                  />
-                </div>
-
-                <ToggleFilter
-                  label="Registration Status"
-                  options={["Active", "Suspended", "Cancelled"]}
-                  selected={filters.registrationStatus}
-                  onChange={(v) => setFilters({ registrationStatus: v })}
-                />
-
-                <ElectionFilter
-                  voters={voters}
-                  selected={filters.selectedElections}
-                  onChange={(v) => setFilters({ selectedElections: v })}
-                />
-
-                <div>
-                  <label className="mb-1.5 block font-semibold text-zinc-700">
-                    Engagement
-                  </label>
-                  <SegmentedControl
-                    options={[
-                      { label: "All", value: "all" as const },
-                      { label: "High", value: "high" as const },
-                      { label: "Med", value: "medium" as const },
-                      { label: "Low", value: "low" as const },
-                      { label: "None", value: "none" as const },
-                    ]}
-                    value={filters.engagementTier}
-                    onChange={(v) => setFilters({ engagementTier: v })}
-                  />
-                </div>
-
+        <div className="flex flex-col gap-4 text-xs">
+          {voters.length === 0 ? (
+            <p className="text-zinc-400">Load campaign data to enable filters.</p>
+          ) : (
+            <>
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Filters
+                </h2>
                 {activeFilterCount > 0 && (
-                  <button
-                    onClick={clearFilters}
-                    className="rounded-md border border-zinc-200 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-50"
-                  >
-                    Clear all filters
-                  </button>
+                  <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-indigo-600 px-1 text-[10px] font-bold text-white">
+                    {activeFilterCount}
+                  </span>
                 )}
-              </>
-            )}
-          </div>
-        )}
+              </div>
+
+              <div>
+                <label className="mb-1.5 block font-semibold text-zinc-700">
+                  Party
+                </label>
+                <SegmentedControl
+                  options={[
+                    { label: "All", value: "all" as const },
+                    { label: "Rep", value: "R" as const },
+                    { label: "Dem/Other", value: "D" as const },
+                    { label: "Unknown", value: "unknown" as const },
+                  ]}
+                  value={filters.primaryParty}
+                  onChange={(v) => setFilters({ primaryParty: v })}
+                />
+              </div>
+
+              <ToggleFilter
+                label="Registration Status"
+                options={["Active", "Suspended", "Cancelled"]}
+                selected={filters.registrationStatus}
+                onChange={(v) => setFilters({ registrationStatus: v })}
+              />
+
+              <ElectionFilter
+                voters={voters}
+                selected={filters.selectedElections}
+                onChange={(v) => setFilters({ selectedElections: v })}
+              />
+
+              <div>
+                <label className="mb-1.5 block font-semibold text-zinc-700">
+                  Engagement
+                </label>
+                <SegmentedControl
+                  options={[
+                    { label: "All", value: "all" as const },
+                    { label: "High", value: "high" as const },
+                    { label: "Med", value: "medium" as const },
+                    { label: "Low", value: "low" as const },
+                    { label: "None", value: "none" as const },
+                  ]}
+                  value={filters.engagementTier}
+                  onChange={(v) => setFilters({ engagementTier: v })}
+                />
+              </div>
+
+              {activeFilterCount > 0 && (
+                <button
+                  onClick={clearFilters}
+                  className="rounded-md border border-zinc-200 px-3 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-50"
+                >
+                  Clear all filters
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* Footer actions */}

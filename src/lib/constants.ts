@@ -30,15 +30,15 @@ export const PARTY_COLORS: Record<string, string> = {
 
 export const PLAN_DAY_COLORS = [
   "#dc2626",
-  "#2563eb",
-  "#16a34a",
+  "#ea580c",
   "#d97706",
+  "#ca8a04",
   "#7c3aed",
-  "#0891b2",
   "#db2777",
-  "#4f46e5",
-  "#059669",
-  "#c2410c",
+  "#be123c",
+  "#1d4ed8",
+  "#0f766e",
+  "#92400e",
 ] as const;
 
 export function planDayColor(day: number): string {

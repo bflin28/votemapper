@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useVoterStore } from "@/store/voter-store";
 
 interface ScrapeFile {
   name: string;
+  label?: string;
   size: string;
   modified: string;
 }
@@ -12,10 +13,13 @@ interface ScrapeFile {
 export default function DataImport() {
   const [scrapes, setScrapes] = useState<ScrapeFile[]>([]);
   const [loadingScrapes, setLoadingScrapes] = useState(true);
-  const [selectedScrapes, setSelectedScrapes] = useState<string[]>([]);
   const requestIdRef = useRef(0);
-  const selectedScrapesRef = useRef<string[]>([]);
-  const { setVoters, setGeocodedVoters, setStage, setError, stage } = useVoterStore();
+  const { setVoters, setGeocodedVoters, setStage, setError, stage, selectedScrapes, setSelectedScrapes } = useVoterStore();
+  const availableNames = useMemo(() => new Set(scrapes.map((file) => file.name)), [scrapes]);
+  const validSelectedScrapes = useMemo(
+    () => selectedScrapes.filter((name) => availableNames.has(name)),
+    [availableNames, selectedScrapes]
+  );
 
   const isImporting = stage === "importing";
 
@@ -26,6 +30,12 @@ export default function DataImport() {
       .catch(() => setScrapes([]))
       .finally(() => setLoadingScrapes(false));
   }, []);
+
+  useEffect(() => {
+    if (validSelectedScrapes.length !== selectedScrapes.length) {
+      setSelectedScrapes(validSelectedScrapes);
+    }
+  }, [selectedScrapes, setSelectedScrapes, validSelectedScrapes]);
 
   async function handleImportResult(res: Response, requestId: number): Promise<void> {
     const data = await res.json();
@@ -47,7 +57,6 @@ export default function DataImport() {
   }
 
   async function applySelection(nextSelected: string[]) {
-    selectedScrapesRef.current = nextSelected;
     setSelectedScrapes(nextSelected);
 
     const requestId = requestIdRef.current + 1;
@@ -78,10 +87,9 @@ export default function DataImport() {
   }
 
   function toggleScrapeSelection(name: string) {
-    const current = selectedScrapesRef.current;
-    const next = current.includes(name)
-      ? current.filter((existing) => existing !== name)
-      : [...current, name];
+    const next = validSelectedScrapes.includes(name)
+      ? validSelectedScrapes.filter((existing) => existing !== name)
+      : [...validSelectedScrapes, name];
     void applySelection(next);
   }
 
@@ -96,13 +104,13 @@ export default function DataImport() {
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
-        <label className="text-xs font-medium text-zinc-500">TX Falls CSVs</label>
+        <label className="text-xs font-medium text-zinc-500">County Precinct CSVs</label>
         {scrapes.length > 0 && (
           <div className="flex items-center gap-2 text-[11px]">
             <button
               type="button"
               onClick={selectAllScrapes}
-              disabled={selectedScrapes.length === scrapes.length}
+              disabled={validSelectedScrapes.length === scrapes.length}
               className="text-zinc-500 hover:text-zinc-700 disabled:cursor-not-allowed disabled:text-zinc-300"
             >
               Select all
@@ -110,7 +118,7 @@ export default function DataImport() {
             <button
               type="button"
               onClick={clearSelection}
-              disabled={selectedScrapes.length === 0}
+              disabled={validSelectedScrapes.length === 0}
               className="text-zinc-500 hover:text-zinc-700 disabled:cursor-not-allowed disabled:text-zinc-300"
             >
               Clear
@@ -126,7 +134,7 @@ export default function DataImport() {
       ) : scrapes.length > 0 ? (
         <div className="max-h-56 overflow-y-auto rounded-md border border-zinc-200 bg-white">
           {scrapes.map((file) => {
-            const selected = selectedScrapes.includes(file.name);
+            const selected = validSelectedScrapes.includes(file.name);
             return (
               <button
                 key={file.name}
@@ -143,7 +151,9 @@ export default function DataImport() {
                     checked={selected}
                     className="h-3.5 w-3.5 rounded border-zinc-300 text-indigo-600"
                   />
-                  <span className="truncate text-xs font-medium text-zinc-700">{file.name}</span>
+                  <span className="truncate text-xs font-medium text-zinc-700">
+                    {file.label ?? file.name}
+                  </span>
                 </span>
                 <span className="shrink-0 text-[10px] text-zinc-400">
                   {file.size} | {file.modified}
@@ -154,13 +164,13 @@ export default function DataImport() {
         </div>
       ) : (
         <div className="rounded-md border border-zinc-200 bg-zinc-50 px-3 py-2 text-center text-xs text-zinc-400">
-          No TX Falls CSV files found in `data/`.
+          No county precinct CSV files found in `data/`.
         </div>
       )}
 
       <p className="text-[11px] text-zinc-400">
         {isImporting
-          ? `Importing ${selectedScrapes.length} CSV${selectedScrapes.length !== 1 ? "s" : ""}...`
+          ? `Importing ${validSelectedScrapes.length} CSV${validSelectedScrapes.length !== 1 ? "s" : ""}...`
           : "Selecting a CSV imports it immediately."}
       </p>
     </div>

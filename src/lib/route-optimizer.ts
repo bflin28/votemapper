@@ -1,6 +1,12 @@
 import { GeocodedVoter } from "./types";
 import { buildDistanceMatrix } from "./distance-matrix";
 
+export type RouteTravelMode = "walking" | "driving";
+
+interface OptimizeRouteOptions {
+  mode?: RouteTravelMode;
+}
+
 function routeLength(matrix: number[][], order: number[]): number {
   let total = 0;
   for (let i = 0; i < order.length - 1; i++) {
@@ -88,16 +94,134 @@ function twoOptOpenPath(initialOrder: number[], matrix: number[][]): number[] {
   return order;
 }
 
-export function optimizeRouteOrder(voters: GeocodedVoter[]): number[] {
+function turnAngleAndDirection(
+  prev: GeocodedVoter,
+  current: GeocodedVoter,
+  next: GeocodedVoter
+): { angleDeg: number; isLeftTurn: boolean } {
+  const avgLatRad = ((prev.lat + current.lat + next.lat) / 3) * (Math.PI / 180);
+  const scaleX = Math.cos(avgLatRad);
+
+  const v1x = (current.lng - prev.lng) * scaleX;
+  const v1y = current.lat - prev.lat;
+  const v2x = (next.lng - current.lng) * scaleX;
+  const v2y = next.lat - current.lat;
+
+  const cross = v1x * v2y - v1y * v2x;
+  const dot = v1x * v2x + v1y * v2y;
+  const angleRad = Math.atan2(Math.abs(cross), dot);
+  const angleDeg = (angleRad * 180) / Math.PI;
+
+  return {
+    angleDeg,
+    isLeftTurn: cross > 0,
+  };
+}
+
+function leftTurnPenaltyMeters(
+  order: number[],
+  voters: GeocodedVoter[],
+  mode: RouteTravelMode
+): number {
+  if (mode !== "driving" || order.length < 3) return 0;
+
+  let penalty = 0;
+  for (let i = 1; i < order.length - 1; i++) {
+    const prev = voters[order[i - 1]];
+    const current = voters[order[i]];
+    const next = voters[order[i + 1]];
+    const { angleDeg, isLeftTurn } = turnAngleAndDirection(prev, current, next);
+
+    if (angleDeg < 25) continue;
+
+    // Driving mode preference: lightly avoid left turns and heavily avoid sharp lefts.
+    if (isLeftTurn) {
+      if (angleDeg >= 140) {
+        penalty += 180;
+      } else if (angleDeg >= 80) {
+        penalty += 110;
+      } else {
+        penalty += 45;
+      }
+      continue;
+    }
+
+    // Penalize extreme U-turn-ish maneuvers in any direction.
+    if (angleDeg >= 165) {
+      penalty += 60;
+    }
+  }
+
+  return penalty;
+}
+
+function routeCost(
+  matrix: number[][],
+  order: number[],
+  voters: GeocodedVoter[],
+  mode: RouteTravelMode
+): number {
+  return routeLength(matrix, order) + leftTurnPenaltyMeters(order, voters, mode);
+}
+
+function twoOptOpenPathByCost(
+  initialOrder: number[],
+  matrix: number[][],
+  voters: GeocodedVoter[],
+  mode: RouteTravelMode
+): number[] {
+  const n = initialOrder.length;
+  if (n < 4) return initialOrder;
+
+  let order = [...initialOrder];
+  let bestCost = routeCost(matrix, order, voters, mode);
+  let improved = true;
+  let passes = 0;
+  const MAX_PASSES = 10;
+
+  while (improved && passes < MAX_PASSES) {
+    improved = false;
+    passes += 1;
+
+    for (let i = 0; i < n - 2; i++) {
+      for (let k = i + 2; k < n - 1; k++) {
+        const candidate = [
+          ...order.slice(0, i + 1),
+          ...order.slice(i + 1, k + 1).reverse(),
+          ...order.slice(k + 1),
+        ];
+        const candidateCost = routeCost(matrix, candidate, voters, mode);
+
+        if (candidateCost + 1 < bestCost) {
+          order = candidate;
+          bestCost = candidateCost;
+          improved = true;
+          break;
+        }
+      }
+      if (improved) break;
+    }
+  }
+
+  return order;
+}
+
+export function optimizeRouteOrder(
+  voters: GeocodedVoter[],
+  options: OptimizeRouteOptions = {}
+): number[] {
   if (voters.length <= 1) return Array.from({ length: voters.length }, (_, i) => i);
+  const mode = options.mode ?? "walking";
 
   const matrix = buildDistanceMatrix(voters);
   const nnOrder = nearestNeighborMultiStart(matrix);
-  const improved = twoOptOpenPath(nnOrder, matrix);
+  const improved =
+    mode === "walking"
+      ? twoOptOpenPath(nnOrder, matrix)
+      : twoOptOpenPathByCost(nnOrder, matrix, voters, mode);
 
-  // Keep whichever is shorter as a safety check.
-  const nnLen = routeLength(matrix, nnOrder);
-  const improvedLen = routeLength(matrix, improved);
-  return improvedLen <= nnLen ? improved : nnOrder;
+  // Keep whichever is better for the selected travel mode.
+  const nnCost = routeCost(matrix, nnOrder, voters, mode);
+  const improvedCost = routeCost(matrix, improved, voters, mode);
+  return improvedCost <= nnCost ? improved : nnOrder;
 }
-
