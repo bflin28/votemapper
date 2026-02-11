@@ -48,10 +48,10 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
   const doorsPerDay = useVoterStore((s) => s.doorsPerDay);
   const setCampaignDays = useVoterStore((s) => s.setCampaignDays);
   const setDoorsPerDay = useVoterStore((s) => s.setDoorsPerDay);
-  const setCampaignStartDate = useVoterStore((s) => s.setCampaignStartDate);
   const addToCampaignList = useVoterStore((s) => s.addToCampaignList);
   const removeFromCampaignList = useVoterStore((s) => s.removeFromCampaignList);
   const clearCampaignList = useVoterStore((s) => s.clearCampaignList);
+  const resetPlanBuilding = useVoterStore((s) => s.resetPlanBuilding);
 
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("name");
@@ -382,6 +382,16 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
     setPendingFinalizeDays(null);
   }
 
+  function handleBackToPlanWizard() {
+    if (campaignList.length > 0 && typeof window !== "undefined") {
+      const confirmed = window.confirm(
+        "Go back to the plan wizard? This will clear your current campaign list."
+      );
+      if (!confirmed) return;
+    }
+    resetPlanBuilding();
+  }
+
   function exportCampaignPlanCSV() {
     if (campaignList.length === 0) return;
 
@@ -491,7 +501,7 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
               placeholder="Search by name or address..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-72 rounded-md border border-zinc-200 px-2.5 py-1.5 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+              className="w-full max-w-lg rounded-md border border-zinc-200 px-2.5 py-1.5 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
             />
             <span className="text-xs text-zinc-400">
               {tableVoters.length} of {voters.length} voters
@@ -499,13 +509,10 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
             {planMode && (
               <>
                 <span className="text-xs text-zinc-400">
-                  {selectedVisibleCount} selected in view
+                  {selectedVisibleCount} selected
                 </span>
-                <span className="text-xs font-medium text-indigo-600">
-                  Campaign list: {campaignList.length}
-                </span>
-                <span className="text-xs text-zinc-400">
-                  Target: ~{campaignDays * doorsPerDay} voters
+                <span className="text-xs text-zinc-500">
+                  Campaign list {campaignList.length}
                 </span>
               </>
             )}
@@ -540,6 +547,24 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
               >
                 Add Selected ({selectedUnplannedIds.length})
               </button>
+
+              <button
+                type="button"
+                onClick={finalizePlan}
+                disabled={campaignList.length === 0 || isPlanFinalized}
+                className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                  isPlanFinalized
+                    ? "border border-emerald-300 bg-emerald-50 text-emerald-700"
+                    : "bg-indigo-600 text-white hover:bg-indigo-700"
+                }`}
+              >
+                {isPlanFinalized ? "Plan Finalized" : "Finalize Plan"}
+              </button>
+            </div>
+          )}
+
+          {planMode && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={handleRemoveSelected}
@@ -556,46 +581,16 @@ export default function VoterTable({ planMode = false }: VoterTableProps) {
               >
                 Clear List
               </button>
-
               <button
                 type="button"
-                onClick={finalizePlan}
-                disabled={campaignList.length === 0 || isPlanFinalized}
-                className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                  isPlanFinalized
-                    ? "border border-emerald-300 bg-emerald-50 text-emerald-700"
-                    : "bg-indigo-600 text-white hover:bg-indigo-700"
-                }`}
+                onClick={handleBackToPlanWizard}
+                className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50"
               >
-                {isPlanFinalized ? "Plan Finalized" : "Finalize Plan"}
+                Back to Plan Wizard
               </button>
-
-              <div className="mx-1 h-4 w-px bg-zinc-200" />
-
-              <label className="text-xs text-zinc-500">Days</label>
-              <input
-                type="number"
-                min={1}
-                max={MAX_PLAN_DAYS}
-                value={normalizedCampaignDays}
-                onChange={(e) => {
-                  const parsed = Number(e.target.value);
-                  if (!Number.isFinite(parsed)) {
-                    setCampaignDays(1);
-                    return;
-                  }
-                  setCampaignDays(parsed);
-                }}
-                className="w-16 rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-700 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-              />
-
-              <label className="text-xs text-zinc-500">Start</label>
-              <input
-                type="date"
-                value={campaignStartDate}
-                onChange={(e) => setCampaignStartDate(e.target.value)}
-                className="rounded-md border border-zinc-200 px-2 py-1 text-xs text-zinc-700 focus:border-indigo-400 focus:outline-none focus:ring-1 focus:ring-indigo-400"
-              />
+              <span className="text-[11px] text-zinc-400">
+                Change days and start date in the wizard.
+              </span>
             </div>
           )}
         </div>
